@@ -1,0 +1,24 @@
+# Reference architectures — studied, not vendored. Keep out of the source tree.
+Qupertino-main/
+MettleQ-main/
+metal-quantum-main/
+zilver-master/
+
+# Internal planning — not published
+ROADMAP.md
+
+# Build artifacts
+build/
+*.o
+*.a
+*.dylib
+*.metallib
+bench/bw_probe
+bench/*.dSYM/
+
+# Measurement output is a research artifact — results/ IS tracked.
+*.csv.tmp
+
+# macOS / stray tooling
+.DS_Store
+.Rhistory
