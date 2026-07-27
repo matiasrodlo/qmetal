@@ -3,7 +3,7 @@ CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Iinclude -Ibuild
 OBJCXX   := -fobjc-arc
 FRAMEWORKS := -framework Metal -framework Foundation
 
-CORE   := src/reference.cpp src/circuits.cpp
+CORE   := src/reference.cpp src/circuits.cpp src/pauli.cpp
 GPU    := src/metal/simulator.mm
 GENHDR := build/kernels_source.h
 

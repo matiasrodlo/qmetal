@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "qmetal/circuit.h"
+#include "qmetal/pauli.h"
 
 namespace qmetal {
 
@@ -34,6 +35,10 @@ class Reference {
 
   double norm() const;                 // sqrt(sum |a|^2), should stay 1
   std::vector<double> probabilities() const;
+
+  // <psi|P|psi> in double, the oracle for the GPU's fused Pauli reduction.
+  double expectation(const PauliString &p) const;
+  double expectation(const Hamiltonian &h) const;
 
  private:
   void apply_1q(uint32_t q, const cdouble m[4]);

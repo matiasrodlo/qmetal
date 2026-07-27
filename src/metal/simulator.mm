@@ -5,6 +5,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 
 #include "qmetal/reference.h"  // gate_matrix_1q, in double
 #include "qmetal/simulator.h"
@@ -43,6 +44,25 @@ GateF32 narrow(const cdouble m[4]) {
 // command buffer keeps peak driver memory predictable on deep circuits.
 constexpr uint32_t kFlushEvery = 4096;
 
+// Reduction geometry. Threadgroups are fixed rather than derived from the state
+// size, so the dispatch stays 1-D and inside 32 bits at any n. Enough groups to
+// saturate 40 GPU cores, few enough that the per-thread float run stays short.
+constexpr uint32_t kReduceGroups = 4096;
+constexpr uint32_t kReduceThreads = 256;
+
+// Amplitudes per block for the sampler. A block is 16 KiB, one page-ish, so
+// resolving a shot inside a block touches very little of the buffer.
+constexpr uint32_t kSampleBlock = 1024;
+
+// splitmix64: same seed gives the same stream on any platform. Do not swap in
+// a libc RNG -- reproducibility is a requirement, not a nicety.
+inline uint64_t splitmix64(uint64_t &s) {
+  uint64_t z = (s += 0x9E3779B97F4A7C15ull);
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+  return z ^ (z >> 31);
+}
+
 }  // namespace
 
 struct Simulator::Impl {
@@ -58,6 +78,35 @@ struct Simulator::Impl {
   id<MTLCommandBuffer> cmd = nil;
   id<MTLComputeCommandEncoder> enc = nil;
   uint32_t encoded = 0;
+
+  // Reduction scratch, allocated on first use and reused thereafter.
+  id<MTLBuffer> partials = nil;   // kReduceGroups * float2
+  id<MTLBuffer> block_sums = nil; // one float per sampler block
+
+  // Run a reduction to completion and return the per-threadgroup partials.
+  // Reductions are synchronous by nature: the caller wants a number.
+  template <typename Bind>
+  const void *reduce(const char *kernel, id<MTLBuffer> out, Bind bind) {
+    flush(true);  // the state must be settled before it is read
+    id<MTLCommandBuffer> c = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [c computeCommandEncoder];
+    [e setComputePipelineState:pipeline(kernel)];
+    [e setBuffer:state offset:0 atIndex:0];
+    [e setBuffer:out offset:0 atIndex:1];
+    uint64_t cnt = dim;
+    [e setBytes:&cnt length:sizeof(cnt) atIndex:2];
+    bind(e);
+    [e dispatchThreadgroups:MTLSizeMake(kReduceGroups, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(kReduceThreads, 1, 1)];
+    [e endEncoding];
+    [c commit];
+    [c waitUntilCompleted];
+    if (c.error)
+      throw std::runtime_error(std::string("reduction failed: ") +
+                               [[c.error description] UTF8String]);
+    dispatches++;
+    return out.contents;
+  }
 
   id<MTLComputePipelineState> pipeline(const char *name) {
     auto it = pipelines.find(name);
@@ -150,8 +199,10 @@ Simulator::Simulator(uint32_t num_qubits) : impl_(new Impl) {
     throw std::runtime_error(std::string("shader compile failed: ") +
                              [[err description] UTF8String]);
 
-  for (const char *name : {"init_basis", "apply_1q", "apply_controlled_1q",
-                           "apply_diagonal_2q", "apply_swap", "apply_ccx"}) {
+  for (const char *name :
+       {"init_basis", "apply_1q", "apply_controlled_1q", "apply_diagonal_2q",
+        "apply_swap", "apply_ccx", "reduce_abs2", "reduce_pauli",
+        "block_abs2"}) {
     id<MTLFunction> fn = [lib newFunctionWithName:@(name)];
     if (!fn)
       throw std::runtime_error(std::string("kernel not found: ") + name);
@@ -312,15 +363,174 @@ std::vector<cdouble> Simulator::amplitudes() {
   return out;
 }
 
-double Simulator::norm() {
-  const float *p = raw();
-  // Accumulate in double: a float32 sum over 2^n terms loses far too much.
-  double s = 0.0;
-  for (size_t i = 0; i < impl_->dim; i++) {
-    double re = p[2 * i], im = p[2 * i + 1];
-    s += re * re + im * im;
+// ---------------------------------------------------------------------------
+// Reductions
+
+double Simulator::abs2sum() {
+  Impl *s = impl_.get();
+  if (!s->partials)
+    s->partials = [s->device newBufferWithLength:kReduceGroups * sizeof(float) * 2
+                                         options:MTLResourceStorageModeShared];
+  const float *p = static_cast<const float *>(
+      s->reduce("reduce_abs2", s->partials, ^(id<MTLComputeCommandEncoder>) {}));
+  double total = 0.0;  // widen here; the GPU stage had no fp64 available
+  for (uint32_t i = 0; i < kReduceGroups; i++) total += p[i];
+  return total;
+}
+
+double Simulator::norm() { return std::sqrt(abs2sum()); }
+
+double Simulator::expectation(const PauliString &pauli) {
+  Impl *s = impl_.get();
+  if (!pauli.valid(s->n))
+    throw std::runtime_error("expectation: invalid Pauli string for this width");
+  if (!s->partials)
+    s->partials = [s->device newBufferWithLength:kReduceGroups * sizeof(float) * 2
+                                         options:MTLResourceStorageModeShared];
+
+  const uint64_t flip = pauli.x_mask | pauli.y_mask;
+  // Y contributes both a per-index sign and a global i per Y.
+  const uint64_t sign_mask = pauli.y_mask | pauli.z_mask;
+  const uint32_t ny = __builtin_popcountll(pauli.y_mask);
+
+  const float *p = static_cast<const float *>(
+      s->reduce("reduce_pauli", s->partials, ^(id<MTLComputeCommandEncoder> e) {
+        [e setBytes:&flip length:sizeof(flip) atIndex:3];
+        [e setBytes:&sign_mask length:sizeof(sign_mask) atIndex:4];
+      }));
+
+  double re = 0.0, im = 0.0;
+  for (uint32_t i = 0; i < kReduceGroups; i++) {
+    re += p[2 * i];
+    im += p[2 * i + 1];
   }
-  return std::sqrt(s);
+  // Multiply by i^ny exactly, then take the real part: P is Hermitian, so the
+  // imaginary part is round-off and discarding it is not an approximation.
+  switch (ny & 3u) {
+    case 0: return re;
+    case 1: return -im;
+    case 2: return -re;
+    default: return im;
+  }
+}
+
+double Simulator::expectation(const Hamiltonian &h) {
+  double total = 0.0;
+  for (const PauliTerm &t : h.terms) total += t.coefficient * expectation(t.pauli);
+  return total;
+}
+
+// ---------------------------------------------------------------------------
+// Sampling
+//
+// Two levels. The GPU reduces |amp|^2 into per-block sums; the host builds a
+// double-precision CDF over those blocks, binary-searches it per shot, then
+// walks inside the chosen block reading directly from the shared buffer. The
+// statevector is never copied and only one block is touched per shot.
+
+std::vector<uint64_t> Simulator::sample(size_t shots, uint64_t seed) {
+  Impl *s = impl_.get();
+  std::vector<uint64_t> out;
+  if (shots == 0) return out;
+
+  const uint64_t nblocks = (s->dim + kSampleBlock - 1) / kSampleBlock;
+  if (!s->block_sums)
+    s->block_sums =
+        [s->device newBufferWithLength:nblocks * sizeof(float)
+                               options:MTLResourceStorageModeShared];
+
+  s->flush(true);
+  {
+    uint64_t w = std::min<uint64_t>(nblocks, 1ull << 26);
+    uint64_t hgt = (nblocks + w - 1) / w;
+    uint32_t grid_w = static_cast<uint32_t>(w);
+    uint64_t cnt = s->dim;
+    uint32_t blk = kSampleBlock;
+    id<MTLCommandBuffer> c = [s->queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [c computeCommandEncoder];
+    [e setComputePipelineState:s->pipeline("block_abs2")];
+    [e setBuffer:s->state offset:0 atIndex:0];
+    [e setBuffer:s->block_sums offset:0 atIndex:1];
+    [e setBytes:&cnt length:sizeof(cnt) atIndex:2];
+    [e setBytes:&blk length:sizeof(blk) atIndex:3];
+    [e setBytes:&grid_w length:sizeof(grid_w) atIndex:4];
+    [e dispatchThreads:MTLSizeMake(w, hgt, 1)
+        threadsPerThreadgroup:MTLSizeMake(std::min<NSUInteger>(256, w), 1, 1)];
+    [e endEncoding];
+    [c commit];
+    [c waitUntilCompleted];
+    if (c.error)
+      throw std::runtime_error("sampling reduction failed");
+    s->dispatches++;
+  }
+
+  const float *bs = static_cast<const float *>(s->block_sums.contents);
+  std::vector<double> cdf(nblocks);
+  double run = 0.0;
+  for (uint64_t b = 0; b < nblocks; b++) {
+    run += bs[b];
+    cdf[b] = run;
+  }
+  const double total = run;
+  const float *amps = static_cast<const float *>(s->state.contents);
+
+  out.resize(shots);
+  if (total <= 0.0) {
+    std::fill(out.begin(), out.end(), 0ull);
+    return out;
+  }
+
+  uint64_t rng = seed;
+  for (size_t k = 0; k < shots; k++) {
+    // 53-bit uniform in [0,1), scaled by the ACTUAL total. The float32 gate
+    // accumulation leaves the norm slightly off 1, and assuming 1 would bias
+    // the tail.
+    double u = double(splitmix64(rng) >> 11) * (1.0 / 9007199254740992.0) * total;
+
+    uint64_t lo = 0, hi = nblocks - 1;
+    while (lo < hi) {
+      uint64_t mid = (lo + hi) >> 1;
+      if (cdf[mid] > u) hi = mid; else lo = mid + 1;
+    }
+    const uint64_t b = lo;
+    double rem = u - (b > 0 ? cdf[b - 1] : 0.0);
+
+    uint64_t start = b * kSampleBlock;
+    uint64_t end = std::min<uint64_t>(start + kSampleBlock, s->dim);
+    double acc = 0.0;
+    uint64_t chosen = start;
+    int64_t last_nonzero = -1;
+    bool found = false;
+    for (uint64_t i = start; i < end; i++) {
+      double re = amps[2 * i], im = amps[2 * i + 1];
+      double pr = re * re + im * im;
+      if (pr > 0.0) last_nonzero = int64_t(i);
+      acc += pr;
+      if (acc > rem) { chosen = i; found = true; break; }
+    }
+    // Round-off can leave the running sum just short; clamp to the last state
+    // that actually had probability rather than to the block edge.
+    if (!found) chosen = (last_nonzero >= 0) ? uint64_t(last_nonzero) : end - 1;
+    out[k] = chosen;
+  }
+  return out;
+}
+
+std::vector<std::pair<std::string, uint64_t>> Simulator::counts(size_t shots,
+                                                                uint64_t seed) {
+  auto idx = sample(shots, seed);
+  std::unordered_map<std::string, uint64_t> tally;
+  const uint32_t n = impl_->n;
+  for (uint64_t v : idx) {
+    std::string bits(n, '0');
+    for (uint32_t q = 0; q < n; q++)
+      if (v & (1ull << q)) bits[n - 1 - q] = '1';  // qubit 0 rightmost
+    tally[bits]++;
+  }
+  std::vector<std::pair<std::string, uint64_t>> out(tally.begin(), tally.end());
+  std::sort(out.begin(), out.end(),
+            [](const auto &a, const auto &b) { return a.second > b.second; });
+  return out;
 }
 
 }  // namespace qmetal

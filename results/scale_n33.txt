@@ -1,0 +1,32 @@
+device : Apple M4 Max
+maxbuf : 80.64 GiB   working set : 107.52 GiB
+
+ghz  20     0.01 GiB  alloc   0.00s  run   0.004s      20 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  21     0.02 GiB  alloc   0.00s  run   0.006s      21 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  22     0.03 GiB  alloc   0.00s  run   0.008s      22 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  23     0.06 GiB  alloc   0.00s  run   0.012s      23 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  24     0.12 GiB  alloc   0.00s  run   0.018s      24 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  25     0.25 GiB  alloc   0.00s  run   0.026s      25 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  26     0.50 GiB  alloc   0.00s  run   0.048s      26 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  27     1.00 GiB  alloc   0.00s  run   0.096s      27 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  28     2.00 GiB  alloc   0.00s  run   0.193s      28 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  29     4.00 GiB  alloc   0.00s  run   0.399s      29 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  30     8.00 GiB  alloc   0.00s  run   0.806s      30 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  31    16.00 GiB  alloc   0.00s  run   1.719s      31 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  32    32.00 GiB  alloc   0.00s  run   3.863s      32 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+ghz  33    64.00 GiB  alloc   0.00s  run   8.160s      33 gates  norm 1.000000  <Z0> +0.00e+00  <Z0 Zn> 1.000000  0/1 2081/2015 other 0  OK
+
+qft  20     0.01 GiB  alloc   0.00s  run   0.008s     210 gates  norm 1.000000  max|<Z_q>| 0.00e+00  OK
+qft  21     0.02 GiB  alloc   0.00s  run   0.012s     231 gates  norm 1.000000  max|<Z_q>| 0.00e+00  OK
+qft  22     0.03 GiB  alloc   0.00s  run   0.021s     253 gates  norm 1.000000  max|<Z_q>| 0.00e+00  OK
+qft  23     0.06 GiB  alloc   0.00s  run   0.043s     276 gates  norm 1.000000  max|<Z_q>| 1.49e-08  OK
+qft  24     0.12 GiB  alloc   0.00s  run   0.095s     300 gates  norm 1.000000  max|<Z_q>| 0.00e+00  OK
+qft  25     0.25 GiB  alloc   0.00s  run   0.201s     325 gates  norm 1.000000  max|<Z_q>| 3.73e-09  OK
+qft  26     0.50 GiB  alloc   0.00s  run   0.417s     351 gates  norm 1.000000  max|<Z_q>| 3.73e-09  OK
+qft  27     1.00 GiB  alloc   0.00s  run   0.876s     378 gates  norm 1.000000  max|<Z_q>| 9.31e-10  OK
+qft  28     2.00 GiB  alloc   0.00s  run   1.879s     406 gates  norm 1.000000  max|<Z_q>| 2.51e-08  OK
+qft  29     4.00 GiB  alloc   0.00s  run   3.366s     435 gates  norm 1.000000  max|<Z_q>| 1.28e-08  OK
+qft  30     8.00 GiB  alloc   0.00s  run   6.469s     465 gates  norm 1.000000  max|<Z_q>| 6.29e-09  OK
+qft  31    16.00 GiB  alloc   0.00s  run  13.568s     496 gates  norm 1.000000  max|<Z_q>| 2.93e-08  OK
+qft  32    32.00 GiB  alloc   0.00s  run  28.053s     528 gates  norm 1.000000  max|<Z_q>| 3.43e-09  OK
+qft  33    64.00 GiB  alloc   0.00s  run  58.067s     561 gates  norm 1.000000  max|<Z_q>| 2.97e-08  OK

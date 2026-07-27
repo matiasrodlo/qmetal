@@ -217,6 +217,34 @@ std::vector<double> Reference::probabilities() const {
   return p;
 }
 
+// Same algebra as the GPU kernel, but written out plainly and in double:
+// P|i> = c(i)|i ^ flip>, c(i) = i^ny * (-1)^popcount(i & (y|z)).
+double Reference::expectation(const PauliString &p) const {
+  if (!p.valid(n_)) throw std::runtime_error("expectation: invalid Pauli string");
+  const size_t flip = size_t(p.x_mask | p.y_mask);
+  const size_t sign_mask = size_t(p.y_mask | p.z_mask);
+  const uint32_t ny = __builtin_popcountll(p.y_mask);
+
+  cdouble acc(0, 0);
+  for (size_t i = 0; i < state_.size(); i++) {
+    double s = (__builtin_popcountll(uint64_t(i & sign_mask)) & 1) ? -1.0 : 1.0;
+    acc += std::conj(state_[i]) * state_[i ^ flip] * s;
+  }
+  // Apply i^ny exactly rather than as a complex multiply.
+  switch (ny & 3u) {
+    case 0: return acc.real();
+    case 1: return -acc.imag();
+    case 2: return -acc.real();
+    default: return acc.imag();
+  }
+}
+
+double Reference::expectation(const Hamiltonian &h) const {
+  double t = 0.0;
+  for (const auto &term : h.terms) t += term.coefficient * expectation(term.pauli);
+  return t;
+}
+
 double max_amplitude_diff(const std::vector<cdouble> &a,
                           const std::vector<cdouble> &b) {
   if (a.size() != b.size()) throw std::runtime_error("size mismatch");

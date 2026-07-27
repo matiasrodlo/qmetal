@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -197,6 +198,137 @@ static void test_dispatch_count() {
         "one dispatch per gate before any fusion exists");
 }
 
+static void test_expectation() {
+  printf("Pauli expectation, GPU reduction vs oracle\n");
+  {
+    // Closed forms on GHZ: every single-qubit Z averages to zero, every ZZ
+    // pair is perfectly correlated, and X on one wire alone is zero.
+    const uint32_t n = 8;
+    Simulator s(n);
+    s.run(ghz(n));
+    check_diff(std::abs(s.expectation(PauliString::single('Z', 0))), 1e-5,
+               "GHZ <Z0> = 0");
+    PauliString zz;
+    zz.z_mask = 0b11;
+    check_diff(std::abs(s.expectation(zz) - 1.0), 1e-5, "GHZ <Z0 Z1> = 1");
+    check_diff(std::abs(s.expectation(PauliString::single('X', 0))), 1e-5,
+               "GHZ <X0> = 0");
+    PauliString allx;
+    for (uint32_t q = 0; q < n; q++) allx.x_mask |= 1ull << q;
+    check_diff(std::abs(s.expectation(allx) - 1.0), 1e-5, "GHZ <X...X> = 1");
+    check_diff(std::abs(s.expectation(PauliString::identity()) - 1.0), 1e-5,
+               "<I> = 1");
+  }
+  {
+    // On |0...0>, <Z_q> = 1 for every wire.
+    const uint32_t n = 6;
+    Simulator s(n);
+    for (uint32_t q = 0; q < n; q++)
+      check_diff(std::abs(s.expectation(PauliString::single('Z', q)) - 1.0),
+                 1e-6, "|0> <Z" + std::to_string(q) + "> = 1");
+  }
+  {
+    // General case: random Pauli strings, including Y, against the oracle on a
+    // state with no symmetry left to hide a sign error.
+    const uint32_t n = 10;
+    Circuit c = random_circuit(n, 4, 0xabc);
+    Reference r(n);
+    r.run(c);
+    Simulator s(n);
+    s.run(c);
+    std::mt19937_64 rng(7);
+    for (int trial = 0; trial < 24; trial++) {
+      PauliString p;
+      for (uint32_t q = 0; q < n; q++) {
+        switch (rng() % 4) {
+          case 1: p.x_mask |= 1ull << q; break;
+          case 2: p.y_mask |= 1ull << q; break;
+          case 3: p.z_mask |= 1ull << q; break;
+          default: break;
+        }
+      }
+      double want = r.expectation(p);
+      double got = s.expectation(p);
+      check_diff(std::abs(want - got), 1e-5,
+                 "random pauli " + p.to_string(n) + " (ref " +
+                     std::to_string(want) + ")");
+    }
+  }
+  {
+    // Hamiltonian sums, and norm via the same reduction path.
+    const uint32_t n = 8;
+    Circuit c = hardware_efficient(n, 2, 0xfeed);
+    Reference r(n);
+    r.run(c);
+    Simulator s(n);
+    s.run(c);
+    Hamiltonian h;
+    for (uint32_t q = 0; q + 1 < n; q++) {
+      PauliString zz;
+      zz.z_mask = (1ull << q) | (1ull << (q + 1));
+      h.add(1.0, zz);
+      h.add(0.3, PauliString::single('X', q));
+    }
+    check_diff(std::abs(r.expectation(h) - s.expectation(h)), 1e-4,
+               "Hamiltonian sum of " + std::to_string(h.size()) + " terms");
+    check_diff(std::abs(s.norm() - 1.0), 1e-5, "GPU norm reduction");
+  }
+}
+
+static void test_sampling() {
+  printf("sampling\n");
+  {
+    // GHZ has exactly two outcomes, at half each.
+    const uint32_t n = 6;
+    Simulator s(n);
+    s.run(ghz(n));
+    auto shots = s.sample(20000, 12345);
+    size_t zeros = 0, ones = 0, other = 0;
+    const uint64_t all = (1ull << n) - 1;
+    for (uint64_t v : shots) {
+      if (v == 0) zeros++;
+      else if (v == all) ones++;
+      else other++;
+    }
+    check(other == 0, "GHZ sampling produces only |0..0> and |1..1>");
+    double frac = double(zeros) / double(zeros + ones);
+    check(std::abs(frac - 0.5) < 0.02,
+          "GHZ sampling is balanced (got " + std::to_string(frac) + ")");
+  }
+  {
+    // Same seed, same stream. Different seed, different stream.
+    Simulator s(5);
+    s.run(qft(5));
+    auto a = s.sample(500, 999);
+    auto b = s.sample(500, 999);
+    auto c = s.sample(500, 1000);
+    check(a == b, "sampling is deterministic under a fixed seed");
+    check(a != c, "a different seed gives a different stream");
+  }
+  {
+    // The empirical distribution must track the exact probabilities. Compare
+    // against the oracle, not against the simulator's own amplitudes.
+    const uint32_t n = 6;
+    Circuit circ = random_circuit(n, 3, 0x1234);
+    Reference r(n);
+    r.run(circ);
+    auto probs = r.probabilities();
+    Simulator s(n);
+    s.run(circ);
+    const size_t shots = 200000;
+    auto draw = s.sample(shots, 2024);
+    std::vector<double> hist(size_t(1) << n, 0.0);
+    for (uint64_t v : draw) hist[v] += 1.0 / double(shots);
+    double tv = 0.0;  // total variation distance
+    for (size_t i = 0; i < hist.size(); i++) tv += std::abs(hist[i] - probs[i]);
+    tv *= 0.5;
+    printf("  total variation vs exact: %.4f (%zu shots)\n", tv, shots);
+    // Sampling error alone is ~sqrt(2^n / shots) / 2; anything much above that
+    // means the CDF walk is biased, not merely noisy.
+    check(tv < 0.02, "sampled distribution matches exact probabilities");
+  }
+}
+
 int main() {
   if (!Simulator::available()) {
     printf("no Metal device; skipping\n");
@@ -211,6 +343,8 @@ int main() {
   test_ccx();
   test_fails_closed();
   test_dispatch_count();
+  test_expectation();
+  test_sampling();
   test_benchmarks();
   test_error_growth();
 

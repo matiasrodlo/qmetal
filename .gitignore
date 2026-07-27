@@ -16,6 +16,7 @@ build/
 bench/bw_probe
 bench/reuse_probe
 bench/zerocheck
+bench/scale
 bench/*.dSYM/
 
 # Measurement output is a research artifact — results/ IS tracked.

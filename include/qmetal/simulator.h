@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "qmetal/circuit.h"
+#include "qmetal/pauli.h"
 
 namespace qmetal {
 
@@ -51,7 +52,27 @@ class Simulator {
   // Valid because the buffer is in unified memory. Synchronizes first.
   const float *raw();
 
-  double norm();
+  // --- reductions, all GPU-resident -------------------------------------
+  // The state never leaves the device for any of these. At 33 qubits a host
+  // loop over 8.6 billion amplitudes is not an option.
+
+  double abs2sum();  // sum |amp|^2
+  double norm();     // sqrt(abs2sum())
+
+  // <psi|P|psi> for a Pauli string, in one fused pass: no |P psi> is
+  // materialised and no scratch state buffer is allocated. Real by
+  // construction, since P is Hermitian.
+  double expectation(const PauliString &p);
+  double expectation(const Hamiltonian &h);  // one pass per term
+
+  // --- sampling ----------------------------------------------------------
+  // Draw measurement outcomes without collapsing the state and without reading
+  // it back. Identical seeds give identical samples.
+  std::vector<uint64_t> sample(size_t shots, uint64_t seed = 0);
+
+  // Bitstring counts, little-endian (qubit 0 is the rightmost character).
+  std::vector<std::pair<std::string, uint64_t>> counts(size_t shots,
+                                                       uint64_t seed = 0);
 
   // Device facts, for reporting and preflight.
   static bool available();

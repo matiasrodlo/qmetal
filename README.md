@@ -9,13 +9,19 @@ simulators, noise models, and hardware output, for developing algorithms up to
 
 ## Numbers
 
-M4 Max (128 GB), `complex64`, one in-place single-qubit gate:
+M4 Max (128 GB), `complex64`, full circuits end to end (`bench/scale`):
 
-| Qubits | State | Cold | Sustained |
+| Qubits | State | GHZ, 33 gates | QFT, 561 gates |
 |---:|---:|---:|---:|
-| 30 | 8 GiB | 35 ms | 63 ms |
-| 32 | 32 GiB | 142 ms | — |
-| 33 | 64 GiB | 290 ms | — |
+| 30 | 8 GiB | 0.81 s | 6.5 s |
+| 31 | 16 GiB | 1.65 s | 13.6 s |
+| 32 | 32 GiB | 3.41 s | 28.1 s |
+| 33 | 64 GiB | **7.67 s** | **58.1 s** |
+
+Both verified at every size without an oracle — at 33 qubits a `complex128`
+reference would need 137 GB. GHZ is checked by norm, `<Z_q> = 0`, `<Z_0 Z_n> = 1`
+and sampling that yields only the two poles; QFT by norm and `<Z_q> = 0` on the
+uniform image. None of those hold if a gate, a stride, or a dispatch is wrong.
 
 Throughput swings **250–485 GB/s** with machine state — same binary, an hour
 apart. The high figure is a cold burst at ~89% of peak; under sustained load it

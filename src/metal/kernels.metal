@@ -111,6 +111,113 @@ kernel void apply_swap(device float2 *state [[buffer(0)]],
     state[j] = tmp;
 }
 
+// ---------------------------------------------------------------------------
+// Reductions
+//
+// Both use a grid-stride loop over a fixed 1-D grid rather than one thread per
+// amplitude. That keeps the dispatch inside 32 bits at any n and lets the
+// threadgroup count be tuned independently of the state size.
+//
+// Precision: each thread accumulates in float32, then one value per threadgroup
+// is written out and the host finishes the sum in double. Apple GPUs have no
+// fp64, so partial-sum widening on the host is the only lever available. With a
+// few thousand threadgroups the per-thread run is short enough that the float
+// stage stays near 1e-6 relative.
+
+// Sum one float across a threadgroup: SIMD-group reduction, then a second pass
+// over the per-SIMD-group results.
+static inline float threadgroup_sum(float v, threadgroup float *scratch,
+                                    uint tid, uint tgsize, uint lane,
+                                    uint sg) {
+    float s = simd_sum(v);
+    if (lane == 0) scratch[sg] = s;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        uint nsg = (tgsize + 31u) / 32u;
+        float x = (lane < nsg) ? scratch[lane] : 0.0f;
+        return simd_sum(x);
+    }
+    return 0.0f;
+}
+
+// sum |amp|^2 over the state, one partial per threadgroup.
+kernel void reduce_abs2(device const float2 *state [[buffer(0)]],
+                        device float *partial [[buffer(1)]],
+                        constant ulong &count [[buffer(2)]],
+                        uint tid [[thread_index_in_threadgroup]],
+                        uint tgid [[threadgroup_position_in_grid]],
+                        uint tgsize [[threads_per_threadgroup]],
+                        uint ntg [[threadgroups_per_grid]],
+                        uint lane [[thread_index_in_simdgroup]],
+                        uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float scratch[32];
+    ulong stride = (ulong)ntg * (ulong)tgsize;
+    float acc = 0.0f;
+    for (ulong i = (ulong)tgid * tgsize + tid; i < count; i += stride) {
+        float2 a = state[i];
+        acc = fma(a.x, a.x, fma(a.y, a.y, acc));
+    }
+    float total = threadgroup_sum(acc, scratch, tid, tgsize, lane, sg);
+    if (tid == 0) partial[tgid] = total;
+}
+
+// Fused Pauli expectation: sum conj(psi_i) * sign(i) * psi_{i ^ flip} in one
+// pass. No |P psi> is ever materialised. The i^ny global factor is applied on
+// the host, where it is exact.
+kernel void reduce_pauli(device const float2 *state [[buffer(0)]],
+                         device float2 *partial [[buffer(1)]],
+                         constant ulong &count [[buffer(2)]],
+                         constant ulong &flip [[buffer(3)]],
+                         constant ulong &sign_mask [[buffer(4)]],
+                         uint tid [[thread_index_in_threadgroup]],
+                         uint tgid [[threadgroup_position_in_grid]],
+                         uint tgsize [[threads_per_threadgroup]],
+                         uint ntg [[threadgroups_per_grid]],
+                         uint lane [[thread_index_in_simdgroup]],
+                         uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float scratch[32];
+    ulong stride = (ulong)ntg * (ulong)tgsize;
+    float accr = 0.0f, acci = 0.0f;
+    for (ulong i = (ulong)tgid * tgsize + tid; i < count; i += stride) {
+        float2 a = state[i];              // psi_i
+        float2 b = state[i ^ flip];       // psi_{i ^ flip}
+        // popcount over a 64-bit mask, as two 32-bit halves.
+        ulong m = i & sign_mask;
+        uint pc = popcount((uint)(m & 0xFFFFFFFFul)) +
+                  popcount((uint)(m >> 32));
+        float s = (pc & 1u) ? -1.0f : 1.0f;
+        // conj(a) * b * s
+        accr += s * (a.x * b.x + a.y * b.y);
+        acci += s * (a.x * b.y - a.y * b.x);
+    }
+    float tr = threadgroup_sum(accr, scratch, tid, tgsize, lane, sg);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float ti = threadgroup_sum(acci, scratch, tid, tgsize, lane, sg);
+    if (tid == 0) partial[tgid] = float2(tr, ti);
+}
+
+// Per-block |amp|^2 sums for sampling: one value per fixed-size contiguous
+// block, so a shot can be resolved by binary search over the blocks and a walk
+// inside the chosen one, touching a single page of the shared buffer.
+kernel void block_abs2(device const float2 *state [[buffer(0)]],
+                       device float *sums [[buffer(1)]],
+                       constant ulong &count [[buffer(2)]],
+                       constant uint &block [[buffer(3)]],
+                       constant uint &grid_w [[buffer(4)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    ulong b = lin(gid, grid_w);
+    ulong start = b * (ulong)block;
+    ulong end = min(start + (ulong)block, count);
+    float acc = 0.0f;
+    for (ulong i = start; i < end; i++) {
+        float2 a = state[i];
+        acc = fma(a.x, a.x, fma(a.y, a.y, acc));
+    }
+    sums[b] = acc;
+}
+
+// ---------------------------------------------------------------------------
+
 // Toffoli: flip the target where both controls are set. Threads: 2^(n-3).
 kernel void apply_ccx(device float2 *state [[buffer(0)]],
                       constant uint &c0 [[buffer(1)]],
