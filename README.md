@@ -97,6 +97,30 @@ Needs a second state buffer, so gradients cap at 32 qubits rather than 33.
 Only RX, RY and RZ are natively differentiable; a parameterised gate outside
 that set raises rather than silently contributing zero.
 
+## Python
+
+A ctypes wrapper over the C ABI, so it needs no compiler, no pybind11 and no
+nanobind -- just the shared library.
+
+```python
+import qmetal
+
+c = qmetal.Circuit(4)
+c.h(0)
+for i in range(3):
+    c.cx(i, i + 1)
+
+sim = qmetal.Simulator(4)
+sim.run(c)
+print(sim.counts(1000))           # {'0000': ~500, '1111': ~500}
+print(sim.expectation("ZZII"))    # 1.0
+print(c.plan_size(fuse=True))     # GPU passes, not gate count
+```
+
+`sim.amplitudes()` returns a zero-copy numpy view of the unified-memory buffer.
+The C ABI in `include/qmetal/qmetal.h` is plain C11 and is the surface other
+languages should bind to; the C++ headers carry no stability promise.
+
 ## Conventions
 
 - Index order LSB-first; qubit *q* has stride `1 << q`

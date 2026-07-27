@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The oracle and the whole fusion pipeline are plain C++ with no Metal
+  # dependency, on purpose: it is what lets every pass be verified on any
+  # machine, and it is what localised the diagonal-layer aliasing bug (0 CPU
+  # failures against 18 GPU failures pointed straight at the binding).
+  portable:
+    name: Portable build and CPU suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run the oracle self-checks
+        run: |
+          clang++ -std=c++17 -O2 -Wall -Wextra -Iinclude \
+            src/reference.cpp src/circuits.cpp src/pauli.cpp src/plan.cpp \
+            tests/test_reference.cpp -o test_reference
+          ./test_reference
+
+      - name: Build and run the fusion suite
+        run: |
+          clang++ -std=c++17 -O2 -Wall -Wextra -Iinclude \
+            src/reference.cpp src/circuits.cpp src/pauli.cpp src/plan.cpp \
+            tests/test_fusion.cpp -o test_fusion
+          ./test_fusion
+
+      - name: C ABI header is valid C
+        run: |
+          printf '#include "qmetal/qmetal.h"\nint main(void){return 0;}\n' > abi.c
+          clang -std=c11 -Wall -Wextra -Werror -Iinclude abi.c -o abi_check
+          ./abi_check
+
+      - name: Working tree is unchanged by the build
+        run: |
+          status="$(git status --porcelain)"
+          if [[ -n "$status" ]]; then
+            echo "Build modified tracked files:"; echo "$status"; exit 1
+          fi
+
+  # Metal work needs real Apple hardware, so this is opt-in rather than
+  # per-push. Timing numbers from CI are not trustworthy anyway -- the thermal
+  # measurement in results/ showed a 1.9x swing on one machine.
+  apple:
+    name: Apple Silicon full suite
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report the device
+        run: |
+          xcrun -sdk macosx metal --version | head -1
+          sysctl -n machdep.cpu.brand_string
+
+      - name: Full suite (oracle, fusion, GPU, Python bindings)
+        run: make test
+
+      - name: Verify 30 qubits end to end
+        run: |
+          make -C bench scale
+          ./bench/scale 30 28
+
+      - name: Working tree is unchanged by the tests
+        run: |
+          status="$(git status --porcelain)"
+          if [[ -n "$status" ]]; then
+            echo "Tests modified tracked files:"; echo "$status"; exit 1
+          fi

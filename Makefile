@@ -7,11 +7,11 @@ CORE   := src/reference.cpp src/circuits.cpp src/pauli.cpp src/plan.cpp
 GPU    := src/metal/simulator.mm
 GENHDR := build/kernels_source.h
 
-.PHONY: all test test-cpu test-fusion test-gpu bench clean
+.PHONY: all test test-cpu test-fusion test-gpu test-python lib bench clean
 
 all: test
 
-test: test-cpu test-fusion test-gpu
+test: test-cpu test-fusion test-gpu test-python
 
 test-cpu: build/test_reference
 	./build/test_reference
@@ -21,6 +21,18 @@ test-fusion: build/test_fusion
 
 test-gpu: build/test_gpu
 	./build/test_gpu
+
+# Shared library exposing the C ABI. The Python bindings load this with ctypes,
+# so they need no compiler and no binding framework.
+lib: build/libqmetal.dylib
+
+build/libqmetal.dylib: $(CORE) src/capi.cpp $(GPU) $(GENHDR) | build
+	$(CXX) $(CXXFLAGS) $(OBJCXX) $(FRAMEWORKS) -dynamiclib \
+	    -install_name @rpath/libqmetal.dylib \
+	    $(CORE) src/capi.cpp $(GPU) -o $@
+
+test-python: build/libqmetal.dylib
+	QMETAL_LIBRARY=build/libqmetal.dylib python3 tests/test_python.py
 
 build/test_reference: $(CORE) tests/test_reference.cpp | build
 	$(CXX) $(CXXFLAGS) $^ -o $@
