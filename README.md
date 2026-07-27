@@ -1,6 +1,6 @@
 # Quantum Metal
 
-Quantum circuit simulator designed specifically for
+High-performance Quantum circuit simulator designed specifically for
 Apple Silicon.
 
 It produces exact amplitudes, ground truth for validating approximate
