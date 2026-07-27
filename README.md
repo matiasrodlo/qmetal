@@ -50,24 +50,34 @@ ablatable. Measured at n=26, both arms alternating in one process:
 
 | circuit | passes | fused | speedup |
 |---|---:|---:|---:|
-| qft | 351 | 51 | **8.33x** |
-| tfim_trotter_20 | 2020 | 540 | 2.43x |
-| qaoa_ring_p6 | 650 | 188 | 2.36x |
-| grover_proxy_4 | 450 | 242 | 1.86x |
-| hea_d3 | 231 | 153 | 1.58x |
-| random_d10 | 385 | 331 | 1.08x |
+| qft | 351 | 51 | **8.42x** |
+| qaoa_ring_p6 | 650 | 55 | **6.06x** |
+| grover_proxy_4 | 450 | 71 | **5.84x** |
+| tfim_trotter_20 | 2020 | 160 | **5.16x** |
+| hea_d3 | 231 | 96 | 3.09x |
+| random_d10 | 385 | 209 | 1.88x |
 | ghz | 26 | 26 | 1.00x |
 
-Geometric mean 2.05x. Speedup tracks the pass count, which is the claim that
-this workload is memory-bound made falsifiable: where the two diverge, the
-fused kernel has stopped being bandwidth-limited.
+Geometric mean 3.67x. Fused kernels run at 240-341 GB/s, inside the sustained
+band, so they remain bandwidth-limited rather than trading memory for
+arithmetic. Random circuits are deliberately hostile to fusion and GHZ has
+nothing to fuse; both are in the frozen set precisely so the mean cannot be
+flattered by picking friendly workloads.
 
-Three passes so far. Runs of commuting diagonal gates collapse into one pass
-whose phase is a sum of masked angles -- a QFT stage's entire controlled-phase
-ladder becomes a single op. `CX . RZ . CX` is recognised as the diagonal ZZ
-coupling it is, which is what makes Trotter and QAOA layers fusable at all.
-Windows of single-qubit gates collapse per wire into one 2x2 product, tested
-with `rtol=0` so a real RZ(1e-6) survives while H*H cancels away.
+Four passes. Runs of commuting diagonal gates collapse into one pass whose
+phase is a sum of masked angles, so a QFT stage's whole controlled-phase ladder
+becomes a single op. `CX . RZ . CX` is recognised as the diagonal ZZ coupling
+it is, which is what makes Trotter and QAOA layers fusable at all. Windows of
+single-qubit gates collapse per wire into one 2x2 product, tested with `rtol=0`
+so a real RZ(1e-6) survives while H*H cancels away. What remains -- a layer of
+gates on distinct wires, where there is nothing to multiply -- runs K at a time
+with 2^K amplitudes held in registers, turning K full-state passes into one at
+identical traffic.
+
+Where speedup and pass count diverge, the gap is the finding rather than noise:
+qaoa and tfim now cut passes 12x but gain 5-6x, because a layer carrying ~75
+phase terms has stopped being bandwidth-limited. That is the same saturation
+the cross-gate blocking probe showed, reached from the opposite direction.
 
 Every pass is verified in double against the same circuit run gate by gate,
 with no GPU involved.

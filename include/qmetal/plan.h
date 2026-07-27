@@ -27,6 +27,7 @@ using cdouble = std::complex<double>;
 struct PlanOp {
   enum class Kind : uint8_t {
     Dense1q,        // arbitrary 2x2 on one wire
+    Dense1qGroup,   // K independent 2x2s, one pass, amplitudes held in registers
     Controlled1q,   // arbitrary 2x2 on `target`, gated by `control`
     DiagonalLayer,  // multiply amplitude i by exp(i * phi(i)); see below
     Swap,
@@ -49,6 +50,14 @@ struct PlanOp {
   std::vector<double> angles;
   double global_phase = 0.0;
 
+  // Dense1qGroup. Wires ascending; four matrix entries per wire, row-major.
+  // A layer of single-qubit gates on distinct wires is the one shape window
+  // collapse cannot help -- each wire carries exactly one gate, so there is
+  // nothing to multiply. Holding 2^K amplitudes in registers and applying K
+  // gates to them turns K full-state passes into one, at identical traffic.
+  std::vector<uint32_t> group_qubits;
+  std::vector<cdouble> group_matrices;
+
   size_t term_count() const { return masks.size(); }
 };
 
@@ -64,8 +73,11 @@ struct FusionOptions {
   bool collapse_1q_windows = true;  // per-wire 2x2 products within a 1q window
   bool fuse_diagonals = true;       // runs of commuting diagonal gates
   bool recognize_zz = true;         // CX . RZ . CX is a diagonal ZZ coupling
+  uint32_t group_1q = 4;            // wires per register group; 1 disables
 
-  static FusionOptions none() { return FusionOptions{false, false, false}; }
+  static FusionOptions none() {
+    return FusionOptions{false, false, false, 1};
+  }
 };
 
 // Translate a circuit into a plan. With FusionOptions::none() this is a

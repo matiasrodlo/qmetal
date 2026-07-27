@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cmath>
+#include <algorithm>
 #include <map>
 #include <vector>
 #include <stdexcept>
@@ -262,11 +263,30 @@ Plan build_plan(const Circuit &c, const FusionOptions &opts) {
             mat_mul(m, it->second.data(), it->second.data());
           }
         }
-        for (uint32_t q : order) {
-          const cdouble *m = prod[q].data();
-          // A window that algebraically cancels emits nothing at all.
-          if (is_identity(m)) continue;
-          plan.ops.push_back(make_dense1q(q, m));
+        // Surviving wires, in ascending order: the group kernel inserts bits
+        // at ascending positions and the plan should not depend on the order
+        // gates happened to appear in.
+        std::vector<uint32_t> live;
+        for (uint32_t q : order)
+          if (!is_identity(prod[q].data())) live.push_back(q);  // cancels drop
+        std::sort(live.begin(), live.end());
+
+        const size_t K = std::max<size_t>(1, opts.group_1q);
+        for (size_t b = 0; b < live.size(); b += K) {
+          size_t take = std::min(K, live.size() - b);
+          if (take == 1) {
+            plan.ops.push_back(make_dense1q(live[b], prod[live[b]].data()));
+            continue;
+          }
+          PlanOp op;
+          op.kind = PlanOp::Kind::Dense1qGroup;
+          for (size_t k = 0; k < take; k++) {
+            uint32_t q = live[b + k];
+            op.group_qubits.push_back(q);
+            const cdouble *m = prod[q].data();
+            op.group_matrices.insert(op.group_matrices.end(), m, m + 4);
+          }
+          plan.ops.push_back(std::move(op));
         }
         i = j;
         continue;

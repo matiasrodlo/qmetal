@@ -237,6 +237,7 @@ Simulator::Simulator(uint32_t num_qubits) : impl_(new Impl) {
   for (const char *name :
        {"init_basis", "apply_1q", "apply_controlled_1q", "apply_diagonal_2q",
         "apply_swap", "apply_ccx", "apply_diagonal_layer",
+        "apply_1q_group2", "apply_1q_group3", "apply_1q_group4",
         "reduce_abs2", "reduce_pauli",
         "block_abs2"}) {
     id<MTLFunction> fn = [lib newFunctionWithName:@(name)];
@@ -402,6 +403,32 @@ void Simulator::apply(const PlanOp &op) {
                   ^(id<MTLComputeCommandEncoder> e, uint32_t gw) {
                     [e setBytes:&gm length:sizeof(gm) atIndex:1];
                     [e setBytes:&q length:sizeof(q) atIndex:2];
+                    [e setBytes:&gw length:sizeof(gw) atIndex:3];
+                  });
+      return;
+    }
+    case PlanOp::Kind::Dense1qGroup: {
+      const size_t k = op.group_qubits.size();
+      if (k < 2 || k > 4) throw std::runtime_error("group size must be 2..4");
+      // Parameters go through the same bump pool as diagonal terms, for the
+      // same reason: dispatches are encoded now and executed later.
+      size_t goff = s->pool_alloc(k * sizeof(GateF32));
+      size_t qoff = s->pool_alloc(k * sizeof(uint32_t));
+      auto *base = static_cast<uint8_t *>(s->term_pool.contents);
+      auto *gp = reinterpret_cast<GateF32 *>(base + goff);
+      auto *qp = reinterpret_cast<uint32_t *>(base + qoff);
+      for (size_t j = 0; j < k; j++) {
+        gp[j] = narrow(&op.group_matrices[4 * j]);
+        qp[j] = op.group_qubits[j];
+      }
+      const char *kernel = (k == 2)   ? "apply_1q_group2"
+                           : (k == 3) ? "apply_1q_group3"
+                                      : "apply_1q_group4";
+      id<MTLBuffer> pool = s->term_pool;
+      s->dispatch(kernel, s->dim >> k,
+                  ^(id<MTLComputeCommandEncoder> e, uint32_t gw) {
+                    [e setBuffer:pool offset:goff atIndex:1];
+                    [e setBuffer:pool offset:qoff atIndex:2];
                     [e setBytes:&gw length:sizeof(gw) atIndex:3];
                   });
       return;

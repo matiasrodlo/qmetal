@@ -60,6 +60,47 @@ kernel void apply_1q(device float2 *state [[buffer(0)]],
     state[j] = cmul(g.m10, a) + cmul(g.m11, b);
 }
 
+// K independent single-qubit gates in ONE pass. A thread owns the 2^K
+// amplitudes that differ only in the K target bits, loads them into registers,
+// applies every gate there, and writes them back. Total traffic is one read and
+// one write of the state regardless of K, so K full-state passes collapse to
+// one. Wires must arrive sorted ascending: the bit inserts assume it.
+//
+// K is a macro rather than a parameter so the register array is indexed by
+// compile-time constants and never spills to memory.
+#define DEFINE_GROUP_KERNEL(K, NAME)                                          \
+kernel void NAME(device float2 *state [[buffer(0)]],                          \
+                 constant Gate2x2 *gates [[buffer(1)]],                       \
+                 constant uint *qs [[buffer(2)]],                             \
+                 constant uint &grid_w [[buffer(3)]],                         \
+                 uint2 gid [[thread_position_in_grid]]) {                     \
+    ulong base = lin(gid, grid_w);                                            \
+    for (uint j = 0; j < K; j++) base = insert_bit(base, qs[j]);              \
+    ulong idx[1u << K];                                                       \
+    float2 a[1u << K];                                                        \
+    for (uint l = 0; l < (1u << K); l++) {                                    \
+        ulong x = base;                                                       \
+        for (uint j = 0; j < K; j++) if ((l >> j) & 1u) x |= (1ul << qs[j]);  \
+        idx[l] = x;                                                           \
+        a[l] = state[x];                                                      \
+    }                                                                         \
+    for (uint j = 0; j < K; j++) {                                            \
+        uint bit = 1u << j;                                                   \
+        Gate2x2 g = gates[j];                                                 \
+        for (uint l = 0; l < (1u << K); l++) {                                \
+            if (l & bit) continue;                                            \
+            float2 x = a[l], y = a[l | bit];                                  \
+            a[l]       = cmul(g.m00, x) + cmul(g.m01, y);                     \
+            a[l | bit] = cmul(g.m10, x) + cmul(g.m11, y);                     \
+        }                                                                     \
+    }                                                                         \
+    for (uint l = 0; l < (1u << K); l++) state[idx[l]] = a[l];                \
+}
+
+DEFINE_GROUP_KERNEL(2, apply_1q_group2)
+DEFINE_GROUP_KERNEL(3, apply_1q_group3)
+DEFINE_GROUP_KERNEL(4, apply_1q_group4)
+
 // Controlled single-qubit gate: apply g to the target only where the control
 // bit is set. One thread owns one (control=1) target pair, so only a quarter of
 // the state is touched. Threads: 2^(n-2).
