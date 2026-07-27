@@ -1,0 +1,9 @@
+device: Apple M4 Max
+
+n,data,seconds,GB/s
+26,all-zero,0.006386,168.1
+26,dense,0.006777,158.5
+28,all-zero,0.013612,315.5
+28,dense,0.013249,324.2
+30,all-zero,0.052127,329.6
+30,dense,0.056013,306.7

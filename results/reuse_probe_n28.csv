@@ -1,0 +1,29 @@
+device                     : Apple M4 Max
+maxThreadgroupMemoryLength : 32768 bytes
+blocked-arm threadgroup occ: 1024 threads max
+n                          : 28 (2.00 GiB)
+
+=== 0. empty-kernel dispatch cost ===
+per dispatch: 4.737 us
+break-even  : a launch costs as much as 2 MiB of traffic
+
+=== 1. correctness: blocked vs unblocked ===
+n=20 K=8 b=10  max amplitude diff: 0.000e+00  PASS
+
+=== 2. reuse vs gate count (b=12) ===
+K,unblocked_s,blocked_s,speedup,ideal
+1,0.013518,0.022635,0.60,1
+2,0.025992,0.027300,0.95,2
+4,0.054433,0.034227,1.59,4
+8,0.118237,0.051829,2.28,8
+16,0.251716,0.074104,3.40,16
+32,0.494947,0.133520,3.71,32
+
+=== 3. reuse vs block size (K=16) ===
+b,block_amps,tg_mem_bytes,unblocked_s,blocked_s,speedup
+6,64,512,0.250225,0.095684,2.62
+8,256,2048,0.242875,0.099394,2.44
+10,1024,8192,0.230210,0.068487,3.36
+12,4096,32768,0.232395,0.074267,3.13
+
+done
