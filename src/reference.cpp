@@ -213,9 +213,10 @@ void Reference::apply(const PlanOp &op) {
     case PlanOp::Kind::Controlled1q:
       apply_controlled_1q(op.qubits[0], op.qubits[1], op.matrix);
       return;
+    case PlanOp::Kind::Blocked1q:
     case PlanOp::Kind::Dense1qGroup:
-      // Independent gates on distinct wires: applying them one after another is
-      // exactly what the grouped kernel does with the amplitudes in registers.
+      // Gates applied in order. That is exactly what the register-group and
+      // threadgroup-staged kernels do; only the residency window differs.
       for (size_t k = 0; k < op.group_qubits.size(); k++)
         apply_1q(op.group_qubits[k], &op.group_matrices[4 * k]);
       return;

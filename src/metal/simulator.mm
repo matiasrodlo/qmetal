@@ -238,6 +238,7 @@ Simulator::Simulator(uint32_t num_qubits) : impl_(new Impl) {
        {"init_basis", "apply_1q", "apply_controlled_1q", "apply_diagonal_2q",
         "apply_swap", "apply_ccx", "apply_diagonal_layer",
         "apply_1q_group2", "apply_1q_group3", "apply_1q_group4",
+        "apply_1q_blocked",
         "reduce_abs2", "reduce_pauli",
         "block_abs2"}) {
     id<MTLFunction> fn = [lib newFunctionWithName:@(name)];
@@ -405,6 +406,42 @@ void Simulator::apply(const PlanOp &op) {
                     [e setBytes:&q length:sizeof(q) atIndex:2];
                     [e setBytes:&gw length:sizeof(gw) atIndex:3];
                   });
+      return;
+    }
+    case PlanOp::Kind::Blocked1q: {
+      const size_t k = op.group_qubits.size();
+      const uint32_t b = op.block_bits;
+      if (b < 2 || b > 12) throw std::runtime_error("block_bits must be 2..12");
+      if (b > s->n) throw std::runtime_error("block larger than the state");
+      size_t goff = s->pool_alloc(k * sizeof(GateF32));
+      size_t qoff = s->pool_alloc(k * sizeof(uint32_t));
+      auto *base = static_cast<uint8_t *>(s->term_pool.contents);
+      auto *gp = reinterpret_cast<GateF32 *>(base + goff);
+      auto *qp = reinterpret_cast<uint32_t *>(base + qoff);
+      for (size_t j = 0; j < k; j++) {
+        gp[j] = narrow(&op.group_matrices[4 * j]);
+        qp[j] = op.group_qubits[j];
+      }
+      uint32_t count = static_cast<uint32_t>(k), bb = b;
+      const uint32_t block = 1u << b;
+      const uint64_t nblocks = s->dim >> b;
+      const NSUInteger threads = std::min<NSUInteger>(256, block >> 1);
+      id<MTLBuffer> pool = s->term_pool;
+
+      // Blocked dispatch needs an exact threadgroup shape, so it does not go
+      // through the generic 2-D helper.
+      id<MTLComputeCommandEncoder> e = s->encoder();
+      [e setComputePipelineState:s->pipeline("apply_1q_blocked")];
+      [e setBuffer:s->state offset:0 atIndex:0];
+      [e setBuffer:pool offset:goff atIndex:1];
+      [e setBuffer:pool offset:qoff atIndex:2];
+      [e setBytes:&count length:sizeof(count) atIndex:3];
+      [e setBytes:&bb length:sizeof(bb) atIndex:4];
+      [e setThreadgroupMemoryLength:block * 8 atIndex:0];
+      [e dispatchThreadgroups:MTLSizeMake(nblocks, 1, 1)
+          threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+      s->dispatches++;
+      if (++s->encoded >= kFlushEvery) s->flush(false);
       return;
     }
     case PlanOp::Kind::Dense1qGroup: {

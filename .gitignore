@@ -18,6 +18,7 @@ bench/reuse_probe
 bench/zerocheck
 bench/scale
 bench/fusion_bench
+bench/ablation
 bench/*.dSYM/
 
 # Measurement output is a research artifact — results/ IS tracked.

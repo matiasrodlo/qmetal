@@ -101,6 +101,47 @@ DEFINE_GROUP_KERNEL(2, apply_1q_group2)
 DEFINE_GROUP_KERNEL(3, apply_1q_group3)
 DEFINE_GROUP_KERNEL(4, apply_1q_group4)
 
+// Cache-level blocking. A threadgroup stages one contiguous 2^b block of the
+// state into threadgroup memory, applies every gate in the run to it, and
+// writes it back once. Traffic is one read and one write of the state no matter
+// how long the run is -- the same bargain the register groups make, one level
+// further out in the hierarchy.
+//
+// Every gate must target a wire below b, so its amplitude pairs stay inside the
+// block. Runs that leave the local window are not blocked.
+kernel void apply_1q_blocked(device float2 *state [[buffer(0)]],
+                             constant Gate2x2 *gates [[buffer(1)]],
+                             constant uint *qs [[buffer(2)]],
+                             constant uint &count [[buffer(3)]],
+                             constant uint &b [[buffer(4)]],
+                             threadgroup float2 *tile [[threadgroup(0)]],
+                             uint tid [[thread_index_in_threadgroup]],
+                             uint tgid [[threadgroup_position_in_grid]],
+                             uint tgsize [[threads_per_threadgroup]]) {
+    uint block = 1u << b;
+    ulong base = (ulong)tgid * (ulong)block;
+
+    for (uint i = tid; i < block; i += tgsize) tile[i] = state[base + i];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint pairs = block >> 1;
+    for (uint k = 0; k < count; k++) {
+        uint q = qs[k];
+        uint stride = 1u << q;
+        Gate2x2 g = gates[k];
+        for (uint t = tid; t < pairs; t += tgsize) {
+            uint i = ((t >> q) << (q + 1)) | (t & (stride - 1));
+            uint j = i | stride;
+            float2 x = tile[i], y = tile[j];
+            tile[i] = cmul(g.m00, x) + cmul(g.m01, y);
+            tile[j] = cmul(g.m10, x) + cmul(g.m11, y);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (uint i = tid; i < block; i += tgsize) state[base + i] = tile[i];
+}
+
 // Controlled single-qubit gate: apply g to the target only where the control
 // bit is set. One thread owns one (control=1) target pair, so only a quarter of
 // the state is touched. Threads: 2^(n-2).

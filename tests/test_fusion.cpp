@@ -62,8 +62,9 @@ static void test_lowering_is_faithful() {
 static void test_fusion_preserves_unitary() {
   printf("fused plans reproduce the circuit\n");
   const FusionOptions all;
-  const FusionOptions diag_only{false, true};
-  const FusionOptions win_only{true, false};
+  const FusionOptions diag_only{false, true, true, 4, 0};
+  const FusionOptions win_only{true, false, false, 4, 0};
+  const FusionOptions blocked = FusionOptions::blocked(8);
   for (const auto &spec : frozen_benchmarks()) {
     for (uint32_t n : {4u, 7u, 11u}) {
       Circuit c = spec.build(n);
@@ -71,6 +72,7 @@ static void test_fusion_preserves_unitary() {
       check_diff(plan_error(c, diag_only), kTol, tag + " diagonals only");
       check_diff(plan_error(c, win_only), kTol, tag + " 1q windows only");
       check_diff(plan_error(c, all), kTol, tag + " both passes");
+      check_diff(plan_error(c, blocked), kTol, tag + " with cache blocking");
     }
   }
 }

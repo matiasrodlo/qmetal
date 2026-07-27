@@ -296,6 +296,65 @@ Plan build_plan(const Circuit &c, const FusionOptions &opts) {
     plan.ops.push_back(lower(c.ops[i]));
     i++;
   }
+
+  // Pass 3 (blocking): merge maximal runs of single-qubit work confined to the
+  // local window into one staged pass. This is the cache-level instance of the
+  // same trade the register groups make; it only applies where every wire in
+  // the run is below block_bits, since otherwise the amplitude pairs leave the
+  // staged block.
+  if (opts.block_bits >= 2) {
+    auto local_1q = [&](const PlanOp &op, std::vector<uint32_t> *ws) {
+      if (op.kind == PlanOp::Kind::Dense1q) {
+        if (op.qubits[0] >= opts.block_bits) return false;
+        if (ws) ws->push_back(op.qubits[0]);
+        return true;
+      }
+      if (op.kind == PlanOp::Kind::Dense1qGroup) {
+        for (uint32_t q : op.group_qubits)
+          if (q >= opts.block_bits) return false;
+        if (ws) ws->insert(ws->end(), op.group_qubits.begin(),
+                           op.group_qubits.end());
+        return true;
+      }
+      return false;
+    };
+
+    Plan out;
+    out.num_qubits = plan.num_qubits;
+    size_t k = 0;
+    while (k < plan.ops.size()) {
+      size_t j = k;
+      while (j < plan.ops.size() && local_1q(plan.ops[j], nullptr)) j++;
+      // A single op gains nothing from staging and pays for it: the S0 probe
+      // measured blocking as a net loss below two ops.
+      if (j - k >= 2) {
+        PlanOp op;
+        op.kind = PlanOp::Kind::Blocked1q;
+        op.block_bits = opts.block_bits;
+        for (size_t m = k; m < j; m++) {
+          const PlanOp &src = plan.ops[m];
+          if (src.kind == PlanOp::Kind::Dense1q) {
+            op.group_qubits.push_back(src.qubits[0]);
+            op.group_matrices.insert(op.group_matrices.end(), src.matrix,
+                                     src.matrix + 4);
+          } else {
+            op.group_qubits.insert(op.group_qubits.end(),
+                                   src.group_qubits.begin(),
+                                   src.group_qubits.end());
+            op.group_matrices.insert(op.group_matrices.end(),
+                                     src.group_matrices.begin(),
+                                     src.group_matrices.end());
+          }
+        }
+        out.ops.push_back(std::move(op));
+        k = j;
+        continue;
+      }
+      out.ops.push_back(std::move(plan.ops[k]));
+      k++;
+    }
+    return out;
+  }
   return plan;
 }
 

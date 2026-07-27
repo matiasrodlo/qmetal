@@ -28,6 +28,7 @@ struct PlanOp {
   enum class Kind : uint8_t {
     Dense1q,        // arbitrary 2x2 on one wire
     Dense1qGroup,   // K independent 2x2s, one pass, amplitudes held in registers
+    Blocked1q,      // a run of 2x2s on low wires, staged in threadgroup memory
     Controlled1q,   // arbitrary 2x2 on `target`, gated by `control`
     DiagonalLayer,  // multiply amplitude i by exp(i * phi(i)); see below
     Swap,
@@ -58,6 +59,11 @@ struct PlanOp {
   std::vector<uint32_t> group_qubits;
   std::vector<cdouble> group_matrices;
 
+  // Blocked1q reuses the same two vectors -- it is a group with more wires,
+  // executed through threadgroup memory instead of registers. block_bits is the
+  // log2 of the staged block size.
+  uint32_t block_bits = 0;
+
   size_t term_count() const { return masks.size(); }
 };
 
@@ -74,9 +80,16 @@ struct FusionOptions {
   bool fuse_diagonals = true;       // runs of commuting diagonal gates
   bool recognize_zz = true;         // CX . RZ . CX is a diagonal ZZ coupling
   uint32_t group_1q = 4;            // wires per register group; 1 disables
+  uint32_t block_bits = 0;          // cache-blocking window, log2; 0 disables
 
   static FusionOptions none() {
-    return FusionOptions{false, false, false, 1};
+    return FusionOptions{false, false, false, 1, 0};
+  }
+  // Fusion on, blocking on -- the fourth cell of the ablation grid.
+  static FusionOptions blocked(uint32_t bits) {
+    FusionOptions o;
+    o.block_bits = bits;
+    return o;
   }
 };
 
