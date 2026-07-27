@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
   double g_f = 0, g_b = 0, g_fb = 0;
   int count = 0;
 
-  for (const auto &spec : frozen_benchmarks()) {
+  for (const auto &spec : extended_benchmarks()) {
     Circuit c = spec.build(n);
     Plan p_base = build_plan(c, none);
     Plan p_f = build_plan(c, fuse);

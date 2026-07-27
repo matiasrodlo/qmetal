@@ -65,12 +65,60 @@ the run. That is the next experiment, and until it is done the honest statement
 is that blocking on top of fusion is worth ~1.05x **with a static split**, not
 that the hierarchy fails to compose.
 
+## Follow-up: the ambiguity is resolved
+
+The two hypotheses were separable by adding a circuit with locality in *wire*
+space. Every circuit in the frozen seven is full-width -- each layer touches
+every wire -- so blocking had nothing to exploit regardless of fusion, and its
+1.18x standalone said more about the benchmarks than about blocking.
+
+`local_patch_w8` is a subroutine acting repeatedly on an 8-wire work register,
+weakly coupled to the rest: an ancilla-based oracle, a block-encoded
+subroutine, a local Hamiltonian patch. Re-running the same grid
+(`results/ablation_n26_b10_extended.txt`):
+
+| circuit | p_base | p_F | p_B | p_FB | F/base | B/base | FB/F |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| local_patch_w8 | 698 | 125 | **125** | 113 | 6.64x | **3.76x** | **1.18x** |
+
+Blocking alone reaches **3.76x**, squarely inside the 3.7-4.1x the S0 synthetic
+probe measured. So hypothesis (2) is excluded: given a circuit with the
+structure it needs, blocking delivers its full effect. It is not that blocking
+barely works.
+
+And yet on that same circuit it adds only **1.18x on top of fusion**.
+
+The mechanism is visible in the pass counts. Fusion alone reaches 125 passes.
+Blocking alone reaches **125 passes** — the identical number, by an entirely
+different route. Together they reach 113, a further 1.10x. The two techniques
+are not finding different work to eliminate; they are eliminating the same
+work, and whichever runs first claims it.
+
+**Conclusion: register-level fusion and cache-level blocking are substitutes,
+not complements.** They exploit one resource — work per data-residency window —
+at two levels of the hierarchy, and the levels are not independent. Composition
+is strongly sub-multiplicative: 6.64x and 3.76x combine to 7.83x, not 25x.
+
+## Caveats that stand
+
+Per-circuit FB/F cells are noisy between runs: TFIM read 1.25x in the first
+grid and 0.88x in the second, on identical code. The aggregate and the
+local_patch result are the load-bearing numbers; individual cells within ~15%
+of 1.0 should not be interpreted.
+
+Qubit reordering is still untested. It would let blocking apply to full-width
+circuits by permuting hot wires into the local window, and it remains the only
+way blocking could help the frozen seven. But the local_patch result predicts
+what it would find: wherever reordering makes blocking applicable, fusion has
+already taken that ground.
+
 ## Standing
 
-- Composition is sub-multiplicative under a static split: 3.68x and 1.18x
-  combine to 3.87x, not 4.34x.
-- The 1.25x on TFIM is the only cell where blocking clearly pays, and it is
-  where the circuit offers long low-wire runs.
+- Composition is strongly sub-multiplicative, and the follow-up shows why: on
+  the one circuit where blocking has full scope, it reduces passes to exactly
+  the count fusion reaches on its own.
+- Fusion is the better instrument of the two. It applies to every circuit
+  shape; blocking needs wire-space locality that most workloads do not have.
 - Verification unchanged: 126 CPU fusion checks including blocked plans, 225
   GPU checks, 87 oracle self-checks. Blocked plans reproduce the circuit
   exactly in double.

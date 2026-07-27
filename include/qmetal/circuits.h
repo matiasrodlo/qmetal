@@ -48,6 +48,15 @@ Circuit random_circuit(uint32_t n, uint32_t depth, uint64_t seed = 0x5eed);
 // The shape most variational workloads actually run.
 Circuit hardware_efficient(uint32_t n, uint32_t depth, uint64_t seed = 0x5eed);
 
+// A subroutine acting repeatedly on a narrow work register, weakly coupled to
+// the rest -- an ancilla-based oracle, a block-encoded subroutine, a local
+// Hamiltonian patch. Every other circuit in the frozen set is full-width: each
+// layer touches every wire, so there is no locality in *wire* space for cache
+// blocking to exploit, no matter how the gates are fused. This one has it by
+// construction, which is what makes the two cases separable.
+Circuit local_patch(uint32_t n, uint32_t width, uint32_t rounds,
+                    uint64_t seed = 0x10ca1);
+
 struct BenchmarkSpec {
   std::string name;
   Circuit (*build)(uint32_t n);
@@ -56,5 +65,11 @@ struct BenchmarkSpec {
 // The frozen set, at whatever qubit count the caller asks for. Depth-carrying
 // circuits use the fixed depths recorded here.
 const std::vector<BenchmarkSpec> &frozen_benchmarks();
+
+// The frozen set plus circuits added later. Appending is allowed; editing an
+// existing generator is not, since it would invalidate prior measurements.
+// Geometric means over the frozen seven stay comparable across the whole
+// project history; means over this list do not.
+const std::vector<BenchmarkSpec> &extended_benchmarks();
 
 }  // namespace qmetal

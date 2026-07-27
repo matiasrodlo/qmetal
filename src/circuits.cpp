@@ -1,6 +1,7 @@
 #include "qmetal/circuits.h"
 
 #include <cmath>
+#include <algorithm>
 #include <random>
 #include <stdexcept>
 
@@ -129,6 +130,31 @@ Circuit hardware_efficient(uint32_t n, uint32_t depth, uint64_t seed) {
   return c;
 }
 
+Circuit local_patch(uint32_t n, uint32_t width, uint32_t rounds, uint64_t seed) {
+  require(n >= 4, "local_patch: need at least 4 qubits");
+  const uint32_t w = std::min(width, n);
+  Circuit c;
+  c.num_qubits = n;
+  std::mt19937_64 rng(seed);
+  std::uniform_real_distribution<double> ang(-M_PI, M_PI);
+  for (uint32_t i = 0; i < n; i++) c.add(g1(G_H, i));
+  for (uint32_t r = 0; r < rounds; r++) {
+    // Dense activity inside the work register: several 1q layers so the run is
+    // long enough for staging to pay, plus local entanglement.
+    for (uint32_t rep = 0; rep < 3; rep++) {
+      for (uint32_t q = 0; q < w; q++) {
+        c.add(g1p(G_RY, q, ang(rng)));
+        c.add(g1p(G_RZ, q, ang(rng)));
+      }
+    }
+    for (uint32_t q = 0; q + 1 < w; q++) c.add(g2(G_CX, q, q + 1));
+    // One coupling out of the register per round, rotating, so the circuit is
+    // genuinely n-qubit rather than a small problem padded with idle wires.
+    if (w < n) c.add(g2(G_CX, 0, w + (r % (n - w))));
+  }
+  return c;
+}
+
 // Fixed depths. These are part of the frozen set; changing one invalidates
 // every measurement taken against it.
 namespace {
@@ -139,6 +165,7 @@ Circuit b_tfim(uint32_t n) { return tfim_trotter(n, 20); }
 Circuit b_grover(uint32_t n) { return grover_proxy(n, 4); }
 Circuit b_random(uint32_t n) { return random_circuit(n, 10); }
 Circuit b_hea(uint32_t n) { return hardware_efficient(n, 3); }
+Circuit b_patch(uint32_t n) { return local_patch(n, 8, 12); }
 }  // namespace
 
 const std::vector<BenchmarkSpec> &frozen_benchmarks() {
@@ -151,6 +178,15 @@ const std::vector<BenchmarkSpec> &frozen_benchmarks() {
       {"random_d10", b_random},
       {"hea_d3", b_hea},
   };
+  return specs;
+}
+
+const std::vector<BenchmarkSpec> &extended_benchmarks() {
+  static const std::vector<BenchmarkSpec> specs = [] {
+    std::vector<BenchmarkSpec> v = frozen_benchmarks();
+    v.push_back({"local_patch_w8", b_patch});
+    return v;
+  }();
   return specs;
 }
 
