@@ -269,8 +269,10 @@ double Reference::expectation(const PauliString &p) const {
 
   cdouble acc(0, 0);
   for (size_t i = 0; i < state_.size(); i++) {
-    double s = (__builtin_popcountll(uint64_t(i & sign_mask)) & 1) ? -1.0 : 1.0;
-    acc += std::conj(state_[i]) * state_[i ^ flip] * s;
+    // Coefficient at the source index: (P psi)_i = c(i ^ flip) psi_{i ^ flip}.
+    const size_t j = i ^ flip;
+    double s = (__builtin_popcountll(uint64_t(j & sign_mask)) & 1) ? -1.0 : 1.0;
+    acc += std::conj(state_[i]) * state_[j] * s;
   }
   // Apply i^ny exactly rather than as a complex multiply.
   switch (ny & 3u) {

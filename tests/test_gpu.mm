@@ -329,6 +329,99 @@ static void test_sampling() {
   }
 }
 
+static void test_gradients() {
+  printf("adjoint gradients vs parameter-shift on the oracle\n");
+
+  // For U = exp(-i t P / 2) the parameter-shift rule is exact:
+  //   dE/dt = [E(t + pi/2) - E(t - pi/2)] / 2
+  // so the oracle here is an identity, not a finite-difference approximation.
+  auto shifted_energy = [](Circuit c, size_t k, double delta,
+                           const Hamiltonian &h) {
+    c.ops[k].params[0] += delta;
+    Reference r(c.num_qubits);
+    r.run(c);
+    return r.expectation(h);
+  };
+
+  struct Case { const char *name; Circuit c; };
+  const uint32_t n = 6;
+  std::vector<Case> cases = {
+      {"hea_d2", hardware_efficient(n, 2, 0xc0ffee)},
+      {"tfim_s3", tfim_trotter(n, 3)},
+      {"qaoa_p2", qaoa_ring(n, 2)},
+  };
+
+  Hamiltonian h;
+  for (uint32_t q = 0; q + 1 < n; q++) {
+    PauliString zz;
+    zz.z_mask = (1ull << q) | (1ull << (q + 1));
+    h.add(1.0, zz);
+  }
+  for (uint32_t q = 0; q < n; q++) h.add(0.4, PauliString::single('X', q));
+  // A Y term, so a sign error in the i^ny handling cannot hide.
+  h.add(0.25, PauliString::single('Y', 0));
+
+  for (auto &cs : cases) {
+    Simulator s(n);
+    auto [energy, grad] = s.energy_and_gradient(cs.c, h);
+
+    Reference r(n);
+    r.run(cs.c);
+    check_diff(std::abs(energy - r.expectation(h)), 1e-4,
+               std::string(cs.name) + " energy matches oracle");
+
+    double worst = 0.0;
+    size_t params = 0;
+    for (size_t k = 0; k < cs.c.ops.size(); k++) {
+      const Gate &g = cs.c.ops[k];
+      if (g.num_params == 0) { 
+        check(grad[k] == 0.0, std::string(cs.name) + " unparameterised gate is zero");
+        continue;
+      }
+      params++;
+      double want = 0.5 * (shifted_energy(cs.c, k, M_PI / 2, h) -
+                           shifted_energy(cs.c, k, -M_PI / 2, h));
+      worst = std::max(worst, std::abs(want - grad[k]));
+    }
+    printf("  %-10s %3zu params  max |adjoint - shift| = %.3e\n", cs.name,
+           params, worst);
+    check_diff(worst, 1e-4, std::string(cs.name) + " gradient matches shift");
+  }
+
+  {
+    // Closed form: for H = Z0 and the circuit RY(t) on wire 0,
+    // E(t) = cos(t) and dE/dt = -sin(t).
+    for (double t : {0.0, 0.3, 1.1, 2.7, -0.9}) {
+      Circuit c;
+      c.num_qubits = 2;
+      c.add(g1p(G_RY, 0, t));
+      Hamiltonian hz;
+      hz.add(1.0, PauliString::single('Z', 0));
+      Simulator s(2);
+      auto [e, gr] = s.energy_and_gradient(c, hz);
+      check_diff(std::abs(e - std::cos(t)), 1e-5, "RY energy = cos(t)");
+      check_diff(std::abs(gr[0] + std::sin(t)), 1e-5, "RY gradient = -sin(t)");
+    }
+  }
+
+  {
+    // Fail closed: a parameterised gate with no native generator raises rather
+    // than silently contributing zero to the gradient.
+    Circuit c;
+    c.num_qubits = 2;
+    c.add(g1(G_H, 0));
+    c.add(g2p(G_CP, 0, 1, 0.4));
+    Hamiltonian hz;
+    hz.add(1.0, PauliString::single('Z', 0));
+    bool threw = false;
+    try {
+      Simulator s(2);
+      s.gradient(c, hz);
+    } catch (const std::exception &) { threw = true; }
+    check(threw, "non-differentiable parameterised gate raises");
+  }
+}
+
 int main() {
   if (!Simulator::available()) {
     printf("no Metal device; skipping\n");
@@ -345,6 +438,7 @@ int main() {
   test_dispatch_count();
   test_expectation();
   test_sampling();
+  test_gradients();
   test_benchmarks();
   test_error_growth();
 

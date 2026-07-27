@@ -78,6 +78,24 @@ class Simulator {
   std::vector<std::pair<std::string, uint64_t>> counts(size_t shots,
                                                        uint64_t seed = 0);
 
+  // --- gradients ---------------------------------------------------------
+  // Adjoint differentiation: every parameter in O(gates) rather than the
+  // O(gates * params) parameter-shift costs. Returns one entry per gate in
+  // circuit order, zero for gates carrying no parameter.
+  //
+  // Needs a second state buffer for the co-state, so it caps one qubit below
+  // the simulator: 32 rather than 33.
+  //
+  // Only RX, RY and RZ are natively differentiable -- gates of the form
+  // exp(-i theta P / 2) for a Pauli generator P. A parameterised gate outside
+  // that set raises rather than silently returning zero.
+  std::vector<double> gradient(const Circuit &c, const Hamiltonian &h);
+
+  // Energy and gradient together. The forward pass is shared, so this is
+  // strictly cheaper than calling expectation() and gradient() separately.
+  std::pair<double, std::vector<double>> energy_and_gradient(
+      const Circuit &c, const Hamiltonian &h);
+
   // Device facts, for reporting and preflight.
   static bool available();
   static std::string device_name();

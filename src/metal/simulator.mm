@@ -116,6 +116,7 @@ struct Simulator::Impl {
   // Reduction scratch, allocated on first use and reused thereafter.
   id<MTLBuffer> partials = nil;   // kReduceGroups * float2
   id<MTLBuffer> block_sums = nil; // one float per sampler block
+  id<MTLBuffer> costate = nil;    // |lambda>, allocated only if gradients run
 
   // Run a reduction to completion and return the per-threadgroup partials.
   // Reductions are synchronous by nature: the caller wants a number.
@@ -239,7 +240,8 @@ Simulator::Simulator(uint32_t num_qubits) : impl_(new Impl) {
         "apply_swap", "apply_ccx", "apply_diagonal_layer",
         "apply_1q_group2", "apply_1q_group3", "apply_1q_group4",
         "apply_1q_blocked",
-        "reduce_abs2", "reduce_pauli",
+        "reduce_abs2", "reduce_pauli", "reduce_pauli2",
+        "pauli_accum", "zero_state",
         "block_abs2"}) {
     id<MTLFunction> fn = [lib newFunctionWithName:@(name)];
     if (!fn)
@@ -724,6 +726,193 @@ std::vector<std::pair<std::string, uint64_t>> Simulator::counts(size_t shots,
   std::sort(out.begin(), out.end(),
             [](const auto &a, const auto &b) { return a.second > b.second; });
   return out;
+}
+
+namespace {
+
+// U^dagger for every gate this simulator supports. Self-inverse gates pass
+// through; the rest negate an angle or swap for their dagger partner.
+Gate invert(const Gate &g) {
+  Gate inv = g;
+  switch (g.kind) {
+    case G_RX: case G_RY: case G_RZ: case G_P: case G_CP:
+      inv.params[0] = -g.params[0];
+      break;
+    case G_S:   inv.kind = G_SDG; break;
+    case G_SDG: inv.kind = G_S;   break;
+    case G_T:   inv.kind = G_TDG; break;
+    case G_TDG: inv.kind = G_T;   break;
+    default: break;  // X, Y, Z, H, CX, CY, CZ, SWAP, CCX are self-inverse
+  }
+  return inv;
+}
+
+// The Pauli generator of a natively differentiable rotation: U = exp(-i t P/2),
+// so dU/dt = -i/2 P U and dE/dt = Im<lambda|P|psi>. Returns false otherwise.
+bool generator_of(const Gate &g, PauliString *p) {
+  switch (g.kind) {
+    case G_RX: *p = PauliString::single('X', g.qubits[0]); return true;
+    case G_RY: *p = PauliString::single('Y', g.qubits[0]); return true;
+    case G_RZ: *p = PauliString::single('Z', g.qubits[0]); return true;
+    default: return false;
+  }
+}
+
+}  // namespace
+
+std::pair<double, std::vector<double>> Simulator::energy_and_gradient(
+    const Circuit &c, const Hamiltonian &h) {
+  Impl *s = impl_.get();
+  if (c.num_qubits != s->n)
+    throw std::runtime_error("circuit/simulator size mismatch");
+
+  // Fail closed before doing any work, so a circuit that cannot be
+  // differentiated does not burn a forward pass first.
+  for (const Gate &g : c.ops) {
+    PauliString p;
+    if (g.num_params > 0 && !generator_of(g, &p))
+      throw std::runtime_error(
+          std::string("gradient: ") + gate_name(g.kind) +
+          " carries a parameter but has no native generator; only rx, ry and "
+          "rz are differentiable");
+  }
+
+  const uint64_t bytes = uint64_t(s->dim) * 8ull;
+  if (!s->costate) {
+    if (bytes > (uint64_t)s->device.maxBufferLength)
+      throw std::runtime_error("gradient: co-state exceeds maxBufferLength");
+    s->costate = [s->device newBufferWithLength:bytes
+                                        options:MTLResourceStorageModeShared];
+    if (!s->costate) throw std::runtime_error("gradient: co-state allocation failed");
+  }
+
+  // Forward pass. Fusion is deliberately off: gradients need per-gate identity,
+  // and a fused plan has already discarded it. Fusing the adjoint sweep is a
+  // separate problem from fusing execution.
+  reset();
+  for (const Gate &g : c.ops) apply(g);
+  s->flush(true);
+
+  // Co-state |lambda> = H|psi>, accumulated one Hamiltonian term at a time.
+  // Each term is one pass and no intermediate buffer.
+  uint32_t gw;
+  uint64_t gh;
+  {
+    uint64_t w = std::min<uint64_t>(s->dim, 1ull << 26);
+    gw = (uint32_t)w;
+    gh = s->dim / w;
+  }
+  {
+    id<MTLCommandBuffer> cb = [s->queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:s->pipeline("zero_state")];
+    [e setBuffer:s->costate offset:0 atIndex:0];
+    [e setBytes:&gw length:sizeof(gw) atIndex:1];
+    [e dispatchThreads:MTLSizeMake(gw, gh, 1)
+        threadsPerThreadgroup:MTLSizeMake(std::min<NSUInteger>(256, gw), 1, 1)];
+    for (const PauliTerm &t : h.terms) {
+      if (!t.pauli.valid(s->n))
+        throw std::runtime_error("gradient: invalid Pauli term");
+      uint64_t flip = t.pauli.x_mask | t.pauli.y_mask;
+      uint64_t sign = t.pauli.y_mask | t.pauli.z_mask;
+      // coeff = c * i^ny, exact on the host.
+      const uint32_t ny = __builtin_popcountll(t.pauli.y_mask);
+      cdouble ph;
+      switch (ny & 3u) {
+        case 0: ph = cdouble(1, 0); break;
+        case 1: ph = cdouble(0, 1); break;
+        case 2: ph = cdouble(-1, 0); break;
+        default: ph = cdouble(0, -1); break;
+      }
+      ph *= t.coefficient;
+      PhaseF32 cf{(float)ph.real(), (float)ph.imag()};
+      [e setComputePipelineState:s->pipeline("pauli_accum")];
+      [e setBuffer:s->costate offset:0 atIndex:0];
+      [e setBuffer:s->state offset:0 atIndex:1];
+      [e setBytes:&flip length:sizeof(flip) atIndex:2];
+      [e setBytes:&sign length:sizeof(sign) atIndex:3];
+      [e setBytes:&cf length:sizeof(cf) atIndex:4];
+      [e setBytes:&gw length:sizeof(gw) atIndex:5];
+      [e dispatchThreads:MTLSizeMake(gw, gh, 1)
+          threadsPerThreadgroup:MTLSizeMake(std::min<NSUInteger>(256, gw), 1, 1)];
+      s->dispatches++;
+    }
+    [e endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) throw std::runtime_error("gradient: co-state build failed");
+  }
+
+  // E = <psi|H|psi> = Re<psi|lambda>, free now that lambda exists.
+  double energy = 0.0;
+  {
+    const float *pp = static_cast<const float *>(s->state.contents);
+    const float *lp = static_cast<const float *>(s->costate.contents);
+    for (size_t i = 0; i < s->dim; i++)
+      energy += double(pp[2 * i]) * lp[2 * i] + double(pp[2 * i + 1]) * lp[2 * i + 1];
+  }
+
+  if (!s->partials)
+    s->partials = [s->device newBufferWithLength:kReduceGroups * sizeof(float) * 2
+                                         options:MTLResourceStorageModeShared];
+
+  // Backward sweep. At step k both states are the ones the formula needs:
+  // psi is psi_k and lambda is lambda_k, so the overlap is taken before the
+  // gate is undone on either.
+  std::vector<double> grad(c.ops.size(), 0.0);
+  for (size_t k = c.ops.size(); k-- > 0;) {
+    const Gate &g = c.ops[k];
+    PauliString p;
+    if (g.num_params > 0 && generator_of(g, &p)) {
+      uint64_t flip = p.x_mask | p.y_mask;
+      uint64_t sign = p.y_mask | p.z_mask;
+      const uint32_t ny = __builtin_popcountll(p.y_mask);
+      s->flush(true);
+      id<MTLCommandBuffer> cb = [s->queue commandBuffer];
+      id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+      [e setComputePipelineState:s->pipeline("reduce_pauli2")];
+      [e setBuffer:s->costate offset:0 atIndex:0];
+      [e setBuffer:s->partials offset:0 atIndex:1];
+      uint64_t cnt = s->dim;
+      [e setBytes:&cnt length:sizeof(cnt) atIndex:2];
+      [e setBuffer:s->state offset:0 atIndex:3];
+      [e setBytes:&flip length:sizeof(flip) atIndex:4];
+      [e setBytes:&sign length:sizeof(sign) atIndex:5];
+      [e dispatchThreadgroups:MTLSizeMake(kReduceGroups, 1, 1)
+          threadsPerThreadgroup:MTLSizeMake(kReduceThreads, 1, 1)];
+      [e endEncoding];
+      [cb commit];
+      [cb waitUntilCompleted];
+      s->dispatches++;
+      const float *pr = static_cast<const float *>(s->partials.contents);
+      double re = 0.0, im = 0.0;
+      for (uint32_t i = 0; i < kReduceGroups; i++) {
+        re += pr[2 * i];
+        im += pr[2 * i + 1];
+      }
+      // Apply i^ny exactly, then take the imaginary part: grad = Im<l|P|psi>.
+      double v;
+      switch (ny & 3u) {
+        case 0: v = im; break;
+        case 1: v = re; break;
+        case 2: v = -im; break;
+        default: v = -re; break;
+      }
+      grad[k] = v;
+    }
+    // Undo the gate on both states.
+    Gate inv = invert(g);
+    apply(inv);
+    std::swap(s->state, s->costate);
+    apply(inv);
+    std::swap(s->state, s->costate);
+  }
+  s->flush(true);
+  return {energy, grad};
+}
+
+std::vector<double> Simulator::gradient(const Circuit &c, const Hamiltonian &h) {
+  return energy_and_gradient(c, h).second;
 }
 
 }  // namespace qmetal

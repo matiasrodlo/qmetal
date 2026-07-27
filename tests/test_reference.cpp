@@ -242,6 +242,48 @@ static void test_qft() {
   }
 }
 
+static void test_pauli_closed_forms() {
+  printf("Pauli expectation closed forms\n");
+  // |+i> = (|0> + i|1>)/sqrt2 is the +1 eigenstate of Y; |-i> is -1. This is
+  // the only family that distinguishes evaluating the Pauli coefficient at the
+  // source index from evaluating it at the destination, so it is the one case
+  // that must be checked against theory rather than against another
+  // implementation.
+  {
+    Reference r(1);
+    r.apply(g1(G_H, 0));
+    r.apply(g1(G_S, 0));            // |+i>
+    check_near(r.expectation(PauliString::single('Y', 0)), 1.0, 1e-12,
+               "<Y> = +1 on |+i>");
+    check_near(r.expectation(PauliString::single('X', 0)), 0.0, 1e-12,
+               "<X> = 0 on |+i>");
+    check_near(r.expectation(PauliString::single('Z', 0)), 0.0, 1e-12,
+               "<Z> = 0 on |+i>");
+  }
+  {
+    Reference r(1);
+    r.apply(g1(G_H, 0));
+    r.apply(g1(G_SDG, 0));          // |-i>
+    check_near(r.expectation(PauliString::single('Y', 0)), -1.0, 1e-12,
+               "<Y> = -1 on |-i>");
+  }
+  {
+    // Two-qubit: <Y0 Y1> = -1 on the singlet-like state produced below.
+    Reference r(2);
+    r.apply(g1(G_H, 0));
+    r.apply(g2(G_CX, 0, 1));        // Bell (|00> + |11>)/sqrt2
+    PauliString yy;
+    yy.y_mask = 0b11;
+    check_near(r.expectation(yy), -1.0, 1e-12, "<Y0 Y1> = -1 on Bell");
+    PauliString xx;
+    xx.x_mask = 0b11;
+    check_near(r.expectation(xx), 1.0, 1e-12, "<X0 X1> = +1 on Bell");
+    PauliString zz;
+    zz.z_mask = 0b11;
+    check_near(r.expectation(zz), 1.0, 1e-12, "<Z0 Z1> = +1 on Bell");
+  }
+}
+
 static void test_unitarity() {
   printf("unitarity across the frozen set\n");
   for (const auto &spec : frozen_benchmarks()) {
@@ -298,6 +340,7 @@ int main() {
   test_two_qubit();
   test_ghz();
   test_qft();
+  test_pauli_closed_forms();
   test_unitarity();
   test_fails_closed();
 

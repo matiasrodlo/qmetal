@@ -285,10 +285,14 @@ kernel void reduce_pauli(device const float2 *state [[buffer(0)]],
     ulong stride = (ulong)ntg * (ulong)tgsize;
     float accr = 0.0f, acci = 0.0f;
     for (ulong i = (ulong)tgid * tgsize + tid; i < count; i += stride) {
+        ulong j = i ^ flip;
         float2 a = state[i];              // psi_i
-        float2 b = state[i ^ flip];       // psi_{i ^ flip}
-        // popcount over a 64-bit mask, as two 32-bit halves.
-        ulong m = i & sign_mask;
+        float2 b = state[j];              // psi_j
+        // The coefficient belongs to the SOURCE index: (P psi)_i = c(j) psi_j.
+        // Evaluating it at i instead is correct whenever flip and sign_mask are
+        // disjoint -- pure X or pure Z strings -- and silently sign-flips every
+        // Y, since Y sets a bit in both masks.
+        ulong m = j & sign_mask;
         uint pc = popcount((uint)(m & 0xFFFFFFFFul)) +
                   popcount((uint)(m >> 32));
         float s = (pc & 1u) ? -1.0f : 1.0f;
@@ -300,6 +304,66 @@ kernel void reduce_pauli(device const float2 *state [[buffer(0)]],
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float ti = threadgroup_sum(acci, scratch, tid, tgsize, lane, sg);
     if (tid == 0) partial[tgid] = float2(tr, ti);
+}
+
+// lambda += coeff * P psi, for building the adjoint co-state |lambda> = H|psi>
+// one Hamiltonian term at a time. (P psi)_i = c(i ^ flip) psi_{i ^ flip}, so a
+// term costs one pass and no intermediate buffer. coeff carries the real
+// coefficient times i^ny, computed exactly on the host.
+kernel void pauli_accum(device float2 *lambda [[buffer(0)]],
+                        device const float2 *psi [[buffer(1)]],
+                        constant ulong &flip [[buffer(2)]],
+                        constant ulong &sign_mask [[buffer(3)]],
+                        constant float2 &coeff [[buffer(4)]],
+                        constant uint &grid_w [[buffer(5)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    ulong i = lin(gid, grid_w);
+    ulong j = i ^ flip;
+    ulong m = j & sign_mask;
+    uint pc = popcount((uint)(m & 0xFFFFFFFFul)) + popcount((uint)(m >> 32));
+    float2 v = psi[j];
+    if (pc & 1u) v = -v;
+    lambda[i] += cmul(coeff, v);
+}
+
+// <lambda|P|psi> across two states, for the per-parameter adjoint overlap.
+// Same reduction as reduce_pauli but reading a bra and a ket that differ.
+kernel void reduce_pauli2(device const float2 *bra [[buffer(0)]],
+                          device float2 *partial [[buffer(1)]],
+                          constant ulong &count [[buffer(2)]],
+                          device const float2 *ket [[buffer(3)]],
+                          constant ulong &flip [[buffer(4)]],
+                          constant ulong &sign_mask [[buffer(5)]],
+                          uint tid [[thread_index_in_threadgroup]],
+                          uint tgid [[threadgroup_position_in_grid]],
+                          uint tgsize [[threads_per_threadgroup]],
+                          uint ntg [[threadgroups_per_grid]],
+                          uint lane [[thread_index_in_simdgroup]],
+                          uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float scratch[32];
+    ulong stride = (ulong)ntg * (ulong)tgsize;
+    float accr = 0.0f, acci = 0.0f;
+    for (ulong i = (ulong)tgid * tgsize + tid; i < count; i += stride) {
+        ulong j = i ^ flip;
+        float2 a = bra[i];
+        float2 b = ket[j];
+        ulong m = j & sign_mask;  // source index, as above
+        uint pc = popcount((uint)(m & 0xFFFFFFFFul)) + popcount((uint)(m >> 32));
+        float s = (pc & 1u) ? -1.0f : 1.0f;
+        accr += s * (a.x * b.x + a.y * b.y);
+        acci += s * (a.x * b.y - a.y * b.x);
+    }
+    float tr = threadgroup_sum(accr, scratch, tid, tgsize, lane, sg);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float ti = threadgroup_sum(acci, scratch, tid, tgsize, lane, sg);
+    if (tid == 0) partial[tgid] = float2(tr, ti);
+}
+
+// Zero a buffer, for co-state initialisation.
+kernel void zero_state(device float2 *v [[buffer(0)]],
+                       constant uint &grid_w [[buffer(1)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    v[lin(gid, grid_w)] = float2(0.0f, 0.0f);
 }
 
 // Per-block |amp|^2 sums for sampling: one value per fixed-size contiguous

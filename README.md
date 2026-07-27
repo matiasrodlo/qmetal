@@ -82,6 +82,21 @@ the cross-gate blocking probe showed, reached from the opposite direction.
 Every pass is verified in double against the same circuit run gate by gate,
 with no GPU involved.
 
+## Gradients
+
+Adjoint differentiation: every parameter in O(gates) rather than the
+O(gates x params) that parameter-shift costs. One forward pass, a co-state
+`|lambda> = H|psi>` accumulated one Hamiltonian term at a time, then a backward
+sweep taking `Im<lambda|P|psi>` per rotation and undoing both states in step.
+
+Verified against the parameter-shift rule computed on the double-precision
+oracle -- which is an identity for `exp(-i t P/2)`, not a finite-difference
+approximation. Agreement is ~1e-6 across HEA, TFIM and QAOA ansatze.
+
+Needs a second state buffer, so gradients cap at 32 qubits rather than 33.
+Only RX, RY and RZ are natively differentiable; a parameterised gate outside
+that set raises rather than silently contributing zero.
+
 ## Conventions
 
 - Index order LSB-first; qubit *q* has stride `1 << q`
