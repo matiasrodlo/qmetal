@@ -1,6 +1,6 @@
-# Quantum Metal
+# Quantum Metal Simulator
 
-High-performance Quantum circuit simulator designed specifically for
+Quantum circuit simulator designed specifically for
 Apple Silicon.
 
 It produces exact amplitudes, ground truth for validating approximate
@@ -47,11 +47,18 @@ maximum: occupancy beats capacity.
 ## Build
 
 ```bash
+make test          # CPU oracle self-checks, then every GPU kernel against it
+
 cd bench && make
 ./bw_probe 33      # bandwidth, stride sensitivity, residency
 ./reuse_probe 28   # cross-gate blocking, launch overhead
 ./zerocheck        # zero vs dense data control
 ```
+
+Correctness is defined against a `complex128` CPU reference, itself validated
+against closed forms rather than against another run. Amplitudes agree to
+~1e-8 for shallow circuits; `complex64` drift grows roughly as G^0.76 in gate
+count, reaching 1.7e-5 at 4,500 gates.
 
 Measurements are only comparable within one run. Let the machine idle before a
 timing run, and never compare absolutes across sessions.
