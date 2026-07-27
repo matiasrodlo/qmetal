@@ -3,23 +3,29 @@ CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Iinclude -Ibuild
 OBJCXX   := -fobjc-arc
 FRAMEWORKS := -framework Metal -framework Foundation
 
-CORE   := src/reference.cpp src/circuits.cpp src/pauli.cpp
+CORE   := src/reference.cpp src/circuits.cpp src/pauli.cpp src/plan.cpp
 GPU    := src/metal/simulator.mm
 GENHDR := build/kernels_source.h
 
-.PHONY: all test test-cpu test-gpu bench clean
+.PHONY: all test test-cpu test-fusion test-gpu bench clean
 
 all: test
 
-test: test-cpu test-gpu
+test: test-cpu test-fusion test-gpu
 
 test-cpu: build/test_reference
 	./build/test_reference
+
+test-fusion: build/test_fusion
+	./build/test_fusion
 
 test-gpu: build/test_gpu
 	./build/test_gpu
 
 build/test_reference: $(CORE) tests/test_reference.cpp | build
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+build/test_fusion: $(CORE) tests/test_fusion.cpp | build
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 build/test_gpu: $(CORE) $(GPU) tests/test_gpu.mm $(GENHDR) | build

@@ -205,6 +205,41 @@ void Reference::run(const Circuit &c) {
   for (const auto &g : c.ops) apply(g);
 }
 
+void Reference::apply(const PlanOp &op) {
+  switch (op.kind) {
+    case PlanOp::Kind::Dense1q:
+      apply_1q(op.qubits[0], op.matrix);
+      return;
+    case PlanOp::Kind::Controlled1q:
+      apply_controlled_1q(op.qubits[0], op.qubits[1], op.matrix);
+      return;
+    case PlanOp::Kind::Swap:
+      apply_swap(op.qubits[0], op.qubits[1]);
+      return;
+    case PlanOp::Kind::CCX:
+      apply_ccx(op.qubits[0], op.qubits[1], op.qubits[2]);
+      return;
+    case PlanOp::Kind::DiagonalLayer: {
+      // Same rule as the kernel: phi(i) sums the angles whose mask is fully
+      // set in i. Accumulated in double here, which is exactly the point --
+      // the GPU does it in float and this is what measures the difference.
+      for (size_t i = 0; i < state_.size(); i++) {
+        double phi = op.global_phase;
+        for (size_t t = 0; t < op.masks.size(); t++)
+          if ((uint64_t(i) & op.masks[t]) == op.masks[t]) phi += op.angles[t];
+        state_[i] *= std::polar(1.0, phi);
+      }
+      return;
+    }
+  }
+  throw std::runtime_error("Reference: unknown PlanOp kind");
+}
+
+void Reference::run(const Plan &p) {
+  if (p.num_qubits != n_) throw std::runtime_error("plan/reference size mismatch");
+  for (const PlanOp &op : p.ops) apply(op);
+}
+
 double Reference::norm() const {
   double s = 0.0;
   for (const auto &a : state_) s += std::norm(a);

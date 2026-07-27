@@ -16,6 +16,7 @@
 
 #include "qmetal/circuit.h"
 #include "qmetal/pauli.h"
+#include "qmetal/plan.h"
 
 namespace qmetal {
 
@@ -28,6 +29,11 @@ class Reference {
   void reset();                       // |0...0>
   void apply(const Gate &g);
   void run(const Circuit &c);
+
+  // Execute a fused plan. Lets every fusion pass be checked against the same
+  // circuit run gate by gate, with no GPU involved.
+  void apply(const PlanOp &op);
+  void run(const Plan &p);
 
   const std::vector<cdouble> &state() const { return state_; }
   uint32_t num_qubits() const { return n_; }

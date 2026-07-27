@@ -111,6 +111,30 @@ kernel void apply_swap(device float2 *state [[buffer(0)]],
     state[j] = tmp;
 }
 
+// Fused diagonal layer. An arbitrary run of commuting diagonal gates becomes
+// ONE pass: the phase of basis index i is the sum of the angles whose mask is
+// fully set in i. A QFT stage's entire controlled-phase ladder collapses here.
+//
+// Terms arrive sorted by ascending |angle| so the float32 accumulation adds
+// small contributions to each other before they meet large ones. Without that
+// ordering the tail of a phase ladder (pi/2^k for large k) is lost outright.
+kernel void apply_diagonal_layer(device float2 *state [[buffer(0)]],
+                                 constant ulong *masks [[buffer(1)]],
+                                 constant float *angles [[buffer(2)]],
+                                 constant uint &nterms [[buffer(3)]],
+                                 constant float2 &global_phase [[buffer(4)]],
+                                 constant uint &grid_w [[buffer(5)]],
+                                 uint2 gid [[thread_position_in_grid]]) {
+    ulong i = lin(gid, grid_w);
+    float phi = 0.0f;
+    for (uint t = 0; t < nterms; t++) {
+        ulong m = masks[t];
+        if ((i & m) == m) phi += angles[t];
+    }
+    float2 p = cmul(global_phase, float2(metal::cos(phi), metal::sin(phi)));
+    state[i] = cmul(p, state[i]);
+}
+
 // ---------------------------------------------------------------------------
 // Reductions
 //

@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <vector>
 #include <cmath>
 #include <stdexcept>
 #include <unordered_map>
@@ -79,6 +80,39 @@ struct Simulator::Impl {
   id<MTLComputeCommandEncoder> enc = nil;
   uint32_t encoded = 0;
 
+  // Bump-allocated pool for diagonal-layer terms.
+  //
+  // Dispatches are encoded lazily and executed later, so a buffer written at
+  // encode time must not be rewritten before the GPU reads it. Handing each
+  // dispatch its own region and resetting only on flush is what makes batching
+  // and per-op parameter buffers coexist. Reusing one region for every layer
+  // silently corrupts all but the last -- which is exactly what it did.
+  id<MTLBuffer> term_pool = nil;
+  size_t pool_capacity = 0;
+  size_t pool_offset = 0;
+
+  void grow_pool(size_t bytes) {
+    size_t cap = pool_capacity ? pool_capacity : (size_t(1) << 16);
+    while (cap < bytes) cap *= 2;
+    term_pool = [device newBufferWithLength:cap
+                                    options:MTLResourceStorageModeShared];
+    pool_capacity = cap;
+    pool_offset = 0;
+  }
+
+  // Metal requires buffer offsets to be 256-byte aligned.
+  size_t pool_alloc(size_t bytes) {
+    size_t aligned = (bytes + 255) & ~size_t(255);
+    if (pool_offset + aligned > pool_capacity) {
+      flush(true);              // drain anything still referencing the pool
+      pool_offset = 0;
+      if (aligned > pool_capacity) grow_pool(aligned);
+    }
+    size_t off = pool_offset;
+    pool_offset += aligned;
+    return off;
+  }
+
   // Reduction scratch, allocated on first use and reused thereafter.
   id<MTLBuffer> partials = nil;   // kReduceGroups * float2
   id<MTLBuffer> block_sums = nil; // one float per sampler block
@@ -139,6 +173,7 @@ struct Simulator::Impl {
     enc = nil;
     cmd = nil;
     encoded = 0;
+    pool_offset = 0;  // nothing references the pool once the buffer has run
   }
 
   // Dispatch `threads` work items, splitting into a 2-D grid so the x extent
@@ -201,7 +236,8 @@ Simulator::Simulator(uint32_t num_qubits) : impl_(new Impl) {
 
   for (const char *name :
        {"init_basis", "apply_1q", "apply_controlled_1q", "apply_diagonal_2q",
-        "apply_swap", "apply_ccx", "reduce_abs2", "reduce_pauli",
+        "apply_swap", "apply_ccx", "apply_diagonal_layer",
+        "reduce_abs2", "reduce_pauli",
         "block_abs2"}) {
     id<MTLFunction> fn = [lib newFunctionWithName:@(name)];
     if (!fn)
@@ -342,10 +378,103 @@ void Simulator::apply(const Gate &g) {
                            gate_name(g.kind));
 }
 
-void Simulator::run(const Circuit &c) {
+void Simulator::run(const Circuit &c) { run(c, FusionOptions{}); }
+
+void Simulator::run(const Circuit &c, const FusionOptions &opts) {
   if (c.num_qubits != impl_->n)
     throw std::runtime_error("circuit/simulator size mismatch");
-  for (const Gate &g : c.ops) apply(g);
+  run(build_plan(c, opts));
+}
+
+void Simulator::run(const Plan &p) {
+  if (p.num_qubits != impl_->n)
+    throw std::runtime_error("plan/simulator size mismatch");
+  for (const PlanOp &op : p.ops) apply(op);
+}
+
+void Simulator::apply(const PlanOp &op) {
+  Impl *s = impl_.get();
+  switch (op.kind) {
+    case PlanOp::Kind::Dense1q: {
+      GateF32 gm = narrow(op.matrix);
+      uint32_t q = op.qubits[0];
+      s->dispatch("apply_1q", s->dim >> 1,
+                  ^(id<MTLComputeCommandEncoder> e, uint32_t gw) {
+                    [e setBytes:&gm length:sizeof(gm) atIndex:1];
+                    [e setBytes:&q length:sizeof(q) atIndex:2];
+                    [e setBytes:&gw length:sizeof(gw) atIndex:3];
+                  });
+      return;
+    }
+    case PlanOp::Kind::Controlled1q: {
+      GateF32 gm = narrow(op.matrix);
+      uint32_t a = op.qubits[0], b = op.qubits[1];
+      s->dispatch("apply_controlled_1q", s->dim >> 2,
+                  ^(id<MTLComputeCommandEncoder> e, uint32_t gw) {
+                    [e setBytes:&gm length:sizeof(gm) atIndex:1];
+                    [e setBytes:&a length:sizeof(a) atIndex:2];
+                    [e setBytes:&b length:sizeof(b) atIndex:3];
+                    [e setBytes:&gw length:sizeof(gw) atIndex:4];
+                  });
+      return;
+    }
+    case PlanOp::Kind::Swap: {
+      uint32_t a = op.qubits[0], b = op.qubits[1];
+      s->dispatch("apply_swap", s->dim >> 2,
+                  ^(id<MTLComputeCommandEncoder> e, uint32_t gw) {
+                    [e setBytes:&a length:sizeof(a) atIndex:1];
+                    [e setBytes:&b length:sizeof(b) atIndex:2];
+                    [e setBytes:&gw length:sizeof(gw) atIndex:3];
+                  });
+      return;
+    }
+    case PlanOp::Kind::CCX: {
+      uint32_t c0 = op.qubits[0], c1 = op.qubits[1], t = op.qubits[2];
+      s->dispatch("apply_ccx", s->dim >> 3,
+                  ^(id<MTLComputeCommandEncoder> e, uint32_t gw) {
+                    [e setBytes:&c0 length:sizeof(c0) atIndex:1];
+                    [e setBytes:&c1 length:sizeof(c1) atIndex:2];
+                    [e setBytes:&t length:sizeof(t) atIndex:3];
+                    [e setBytes:&gw length:sizeof(gw) atIndex:4];
+                  });
+      return;
+    }
+    case PlanOp::Kind::DiagonalLayer: {
+      const size_t nt = op.masks.size();
+      if (nt == 0) return;
+      // Sort by ascending |angle| so the kernel's float accumulation adds small
+      // contributions together before they meet large ones. Without this the
+      // tail of a phase ladder is lost to round-off entirely.
+      std::vector<size_t> idx(nt);
+      for (size_t i = 0; i < nt; i++) idx[i] = i;
+      std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+        return std::abs(op.angles[a]) < std::abs(op.angles[b]);
+      });
+      size_t mask_off = s->pool_alloc(nt * sizeof(uint64_t));
+      size_t angle_off = s->pool_alloc(nt * sizeof(float));
+      auto *base = static_cast<uint8_t *>(s->term_pool.contents);
+      auto *mp = reinterpret_cast<uint64_t *>(base + mask_off);
+      auto *ap = reinterpret_cast<float *>(base + angle_off);
+      for (size_t i = 0; i < nt; i++) {
+        mp[i] = op.masks[idx[i]];
+        ap[i] = static_cast<float>(op.angles[idx[i]]);
+      }
+      uint32_t count = static_cast<uint32_t>(nt);
+      PhaseF32 gp{static_cast<float>(std::cos(op.global_phase)),
+                  static_cast<float>(std::sin(op.global_phase))};
+      id<MTLBuffer> pool = s->term_pool;
+      s->dispatch("apply_diagonal_layer", s->dim,
+                  ^(id<MTLComputeCommandEncoder> e, uint32_t gw) {
+                    [e setBuffer:pool offset:mask_off atIndex:1];
+                    [e setBuffer:pool offset:angle_off atIndex:2];
+                    [e setBytes:&count length:sizeof(count) atIndex:3];
+                    [e setBytes:&gp length:sizeof(gp) atIndex:4];
+                    [e setBytes:&gw length:sizeof(gw) atIndex:5];
+                  });
+      return;
+    }
+  }
+  throw std::runtime_error("Simulator: unknown PlanOp kind");
 }
 
 void Simulator::synchronize() { impl_->flush(true); }

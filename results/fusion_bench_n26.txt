@@ -1,0 +1,13 @@
+device : Apple M4 Max
+n      : 26 (0.50 GiB)
+
+circuit              gates  passes0  passes1   unfused     fused  speedup  vs.pass
+ghz                     26       26       26    0.034s    0.034s    1.00x    1.00x
+qft                    351      351       51    1.475s    0.183s    8.06x    6.88x
+qaoa_ring_p6           650      650      188    1.537s    0.615s    2.50x    3.46x
+tfim_trotter_20       2020     2020      540    4.429s    1.751s    2.53x    3.74x
+grover_proxy_4         450      450      242    1.253s    0.649s    1.93x    1.86x
+random_d10             385      385      331    0.910s    0.788s    1.15x    1.16x
+hea_d3                 231      231      153    0.495s    0.322s    1.54x    1.51x
+
+geometric mean speedup: 2.09x

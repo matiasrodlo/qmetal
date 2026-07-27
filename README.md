@@ -43,6 +43,35 @@ applying K gates to it before writing back — gives **3.7–4.1× at K=32**,
 saturating far below the ideal K. The best block is 8 KB, not the 32 KB
 maximum: occupancy beats capacity.
 
+## Fusion
+
+Gates are lowered into a `Plan` by a pipeline of passes, each independently
+ablatable. Measured at n=26, both arms alternating in one process:
+
+| circuit | passes | fused | speedup |
+|---|---:|---:|---:|
+| qft | 351 | 51 | **8.33x** |
+| tfim_trotter_20 | 2020 | 540 | 2.43x |
+| qaoa_ring_p6 | 650 | 188 | 2.36x |
+| grover_proxy_4 | 450 | 242 | 1.86x |
+| hea_d3 | 231 | 153 | 1.58x |
+| random_d10 | 385 | 331 | 1.08x |
+| ghz | 26 | 26 | 1.00x |
+
+Geometric mean 2.05x. Speedup tracks the pass count, which is the claim that
+this workload is memory-bound made falsifiable: where the two diverge, the
+fused kernel has stopped being bandwidth-limited.
+
+Three passes so far. Runs of commuting diagonal gates collapse into one pass
+whose phase is a sum of masked angles -- a QFT stage's entire controlled-phase
+ladder becomes a single op. `CX . RZ . CX` is recognised as the diagonal ZZ
+coupling it is, which is what makes Trotter and QAOA layers fusable at all.
+Windows of single-qubit gates collapse per wire into one 2x2 product, tested
+with `rtol=0` so a real RZ(1e-6) survives while H*H cancels away.
+
+Every pass is verified in double against the same circuit run gate by gate,
+with no GPU involved.
+
 ## Conventions
 
 - Index order LSB-first; qubit *q* has stride `1 << q`

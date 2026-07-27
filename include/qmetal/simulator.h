@@ -17,6 +17,7 @@
 
 #include "qmetal/circuit.h"
 #include "qmetal/pauli.h"
+#include "qmetal/plan.h"
 
 namespace qmetal {
 
@@ -38,7 +39,10 @@ class Simulator {
 
   void reset();                    // |0...0>
   void apply(const Gate &g);       // throws on an unsupported gate
-  void run(const Circuit &c);
+  void run(const Circuit &c);      // builds a plan with default fusion
+  void run(const Circuit &c, const FusionOptions &opts);
+  void apply(const PlanOp &op);    // throws on an unsupported op
+  void run(const Plan &p);
   void synchronize();              // flush and wait
 
   uint32_t num_qubits() const;
