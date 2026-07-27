@@ -1,4 +1,4 @@
-# corequantum
+# Quantum Metal
 
 Quantum circuit simulator designed specifically for
 Apple Silicon.
