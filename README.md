@@ -141,8 +141,33 @@ cd bench && make
 
 Correctness is defined against a `complex128` CPU reference, itself validated
 against closed forms rather than against another run. Amplitudes agree to
-~1e-8 for shallow circuits; `complex64` drift grows roughly as G^0.76 in gate
-count, reaching 1.7e-5 at 4,500 gates.
+~1e-8 for shallow circuits; `complex64` drift then grows as roughly G^0.80 in
+gate count (R²=0.97 over 45–4,500 gates on TFIM Trotter at n=12), reaching
+1.2e-5 at 4,500 gates. It is a single regime — one power law, no knee.
+
+An earlier version of this file reported a knee near depth 90, where the error
+jumped five orders and saturated near O(0.3), and attributed it to chaotic
+divergence between the fp32 and fp64 trajectories. That was wrong. It was a
+bug in this simulator's parameter pool, and the tell was the norm: the state
+stopped being a unit vector, which no amount of chaos in a unitary evolution
+can cause. Two defects, both in `src/metal/simulator.mm`:
+
+- The pool was recycled when the command encoder closed, not when the GPU had
+  actually run the buffer. A non-blocking flush handed live parameter bytes
+  back to the allocator while dispatches were still reading them.
+- A pool wrap could land between the two parameter regions of a single op,
+  stranding the first region above the reset while later ops were handed the
+  same bytes.
+
+Neither could fire until a single command buffer held enough dispatches to
+fill the pool. Everything `test_gpu` actually *asserted* ran below that
+threshold; the one case that crossed it was the drift table, which printed its
+numbers without checking them — so the corruption was on screen the whole time
+and read as a physics result. `test_gpu` now asserts those figures, checks the
+norm alongside every amplitude comparison, extends the frozen benchmark sweep
+to n=20 (the smallest width where the set fills the pool mid-buffer), and
+sweeps `QMETAL_FLUSH_EVERY` to require bit-identical results regardless of how
+work is grouped into command buffers.
 
 Measurements are only comparable within one run. Let the machine idle before a
 timing run, and never compare absolutes across sessions.

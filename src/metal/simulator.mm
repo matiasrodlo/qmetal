@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <vector>
 #include <cmath>
 #include <stdexcept>
@@ -43,7 +44,21 @@ GateF32 narrow(const cdouble m[4]) {
 
 // Flush after this many encodes. Metal tolerates far more, but bounding the
 // command buffer keeps peak driver memory predictable on deep circuits.
-constexpr uint32_t kFlushEvery = 4096;
+//
+// Read per simulator rather than once, so tests can vary it. Results must not
+// depend on it: the cadence decides only how work is grouped into command
+// buffers, never what the GPU computes. test_gpu asserts that directly.
+constexpr uint32_t kFlushEveryDefault = 4096;
+
+uint32_t flush_every_setting() {
+  const char *e = getenv("QMETAL_FLUSH_EVERY");
+  if (!e) return kFlushEveryDefault;
+  int v = atoi(e);
+  return v > 0 ? static_cast<uint32_t>(v) : kFlushEveryDefault;
+}
+
+// Committed buffers allowed to be outstanding before encoding blocks.
+constexpr size_t kMaxPending = 2;
 
 // Reduction geometry. Threadgroups are fixed rather than derived from the state
 // size, so the dispatch stays 1-D and inside 32 bits at any n. Enough groups to
@@ -79,14 +94,21 @@ struct Simulator::Impl {
   id<MTLCommandBuffer> cmd = nil;
   id<MTLComputeCommandEncoder> enc = nil;
   uint32_t encoded = 0;
+  uint32_t flush_every = flush_every_setting();
+
+  // Committed but not yet waited on, oldest first.
+  std::vector<id<MTLCommandBuffer>> pending;
 
   // Bump-allocated pool for diagonal-layer terms.
   //
   // Dispatches are encoded lazily and executed later, so a buffer written at
   // encode time must not be rewritten before the GPU reads it. Handing each
-  // dispatch its own region and resetting only on flush is what makes batching
-  // and per-op parameter buffers coexist. Reusing one region for every layer
-  // silently corrupts all but the last -- which is exactly what it did.
+  // dispatch its own region is what makes batching and per-op parameter
+  // buffers coexist. Reusing one region for every layer silently corrupts all
+  // but the last -- which is exactly what it did.
+  //
+  // The bump pointer resets on drain, never merely on flush: a committed
+  // buffer still reads its regions after the encoder is gone. See drain().
   id<MTLBuffer> term_pool = nil;
   size_t pool_capacity = 0;
   size_t pool_offset = 0;
@@ -101,16 +123,31 @@ struct Simulator::Impl {
   }
 
   // Metal requires buffer offsets to be 256-byte aligned.
+  static size_t pool_align(size_t bytes) { return (bytes + 255) & ~size_t(255); }
+
   size_t pool_alloc(size_t bytes) {
-    size_t aligned = (bytes + 255) & ~size_t(255);
+    size_t aligned = pool_align(bytes);
     if (pool_offset + aligned > pool_capacity) {
-      flush(true);              // drain anything still referencing the pool
-      pool_offset = 0;
+      flush(true);  // drains, which is what actually frees the pool
       if (aligned > pool_capacity) grow_pool(aligned);
     }
     size_t off = pool_offset;
     pool_offset += aligned;
     return off;
+  }
+
+  // Two regions for one dispatch, reserved together.
+  //
+  // Allocating them with two pool_alloc calls lets the pool wrap in between.
+  // The wrap flushes and resets the bump pointer, so the first region is left
+  // above the reset while later ops hand the same bytes out again -- and the
+  // dispatch that reads the first region has not been encoded yet, so the
+  // flush does not cover it. Reserving both at once makes a wrap impossible
+  // mid-op, which is the only reason the pool is safe at all.
+  std::pair<size_t, size_t> pool_alloc2(size_t a_bytes, size_t b_bytes) {
+    size_t a = pool_align(a_bytes);
+    size_t off = pool_alloc(a + pool_align(b_bytes));
+    return {off, off + a};
   }
 
   // Reduction scratch, allocated on first use and reused thereafter.
@@ -158,23 +195,37 @@ struct Simulator::Impl {
     return enc;
   }
 
-  void flush(bool wait) {
-    if (!enc) return;
-    [enc endEncoding];
-    [cmd commit];
-    if (wait) {
-      [cmd waitUntilCompleted];
-      if (cmd.error) {
-        NSString *d = [cmd.error description];
-        enc = nil;
-        cmd = nil;
+  // Block until every committed buffer has run, then release the pool. The
+  // pool is tied to draining rather than to closing the encoder: a committed
+  // buffer keeps reading its parameter regions long after the encoder is gone,
+  // so recycling on close would hand live bytes to the next op.
+  void drain() {
+    for (id<MTLCommandBuffer> c : pending) {
+      [c waitUntilCompleted];
+      if (c.error) {
+        NSString *d = [c.error description];
+        pending.clear();
         throw std::runtime_error(std::string("GPU error: ") + [d UTF8String]);
       }
     }
-    enc = nil;
-    cmd = nil;
-    encoded = 0;
-    pool_offset = 0;  // nothing references the pool once the buffer has run
+    pending.clear();
+    pool_offset = 0;
+  }
+
+  void flush(bool wait) {
+    if (enc) {
+      [enc endEncoding];
+      [cmd commit];
+      pending.push_back(cmd);
+      enc = nil;
+      cmd = nil;
+      encoded = 0;
+    }
+    // Capping the queue at kMaxPending leaves one buffer executing while the
+    // next is encoded, which is all the overlap this needs, and it bounds peak
+    // driver memory on circuits that never touch the pool and so would
+    // otherwise never drain on their own.
+    if (wait || pending.size() >= kMaxPending) drain();
   }
 
   // Dispatch `threads` work items, splitting into a 2-D grid so the x extent
@@ -195,7 +246,7 @@ struct Simulator::Impl {
         threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
 
     dispatches++;
-    if (++encoded >= kFlushEvery) flush(false);
+    if (++encoded >= flush_every) flush(false);
   }
 };
 
@@ -415,8 +466,8 @@ void Simulator::apply(const PlanOp &op) {
       const uint32_t b = op.block_bits;
       if (b < 2 || b > 12) throw std::runtime_error("block_bits must be 2..12");
       if (b > s->n) throw std::runtime_error("block larger than the state");
-      size_t goff = s->pool_alloc(k * sizeof(GateF32));
-      size_t qoff = s->pool_alloc(k * sizeof(uint32_t));
+      auto off2 = s->pool_alloc2(k * sizeof(GateF32), k * sizeof(uint32_t));
+      const size_t goff = off2.first, qoff = off2.second;
       auto *base = static_cast<uint8_t *>(s->term_pool.contents);
       auto *gp = reinterpret_cast<GateF32 *>(base + goff);
       auto *qp = reinterpret_cast<uint32_t *>(base + qoff);
@@ -443,7 +494,7 @@ void Simulator::apply(const PlanOp &op) {
       [e dispatchThreadgroups:MTLSizeMake(nblocks, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
       s->dispatches++;
-      if (++s->encoded >= kFlushEvery) s->flush(false);
+      if (++s->encoded >= s->flush_every) s->flush(false);
       return;
     }
     case PlanOp::Kind::Dense1qGroup: {
@@ -451,8 +502,8 @@ void Simulator::apply(const PlanOp &op) {
       if (k < 2 || k > 4) throw std::runtime_error("group size must be 2..4");
       // Parameters go through the same bump pool as diagonal terms, for the
       // same reason: dispatches are encoded now and executed later.
-      size_t goff = s->pool_alloc(k * sizeof(GateF32));
-      size_t qoff = s->pool_alloc(k * sizeof(uint32_t));
+      auto off2 = s->pool_alloc2(k * sizeof(GateF32), k * sizeof(uint32_t));
+      const size_t goff = off2.first, qoff = off2.second;
       auto *base = static_cast<uint8_t *>(s->term_pool.contents);
       auto *gp = reinterpret_cast<GateF32 *>(base + goff);
       auto *qp = reinterpret_cast<uint32_t *>(base + qoff);
@@ -516,8 +567,8 @@ void Simulator::apply(const PlanOp &op) {
       std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
         return std::abs(op.angles[a]) < std::abs(op.angles[b]);
       });
-      size_t mask_off = s->pool_alloc(nt * sizeof(uint64_t));
-      size_t angle_off = s->pool_alloc(nt * sizeof(float));
+      auto off2 = s->pool_alloc2(nt * sizeof(uint64_t), nt * sizeof(float));
+      const size_t mask_off = off2.first, angle_off = off2.second;
       auto *base = static_cast<uint8_t *>(s->term_pool.contents);
       auto *mp = reinterpret_cast<uint64_t *>(base + mask_off);
       auto *ap = reinterpret_cast<float *>(base + angle_off);

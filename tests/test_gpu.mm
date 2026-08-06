@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
 #include <string>
 #include <vector>
@@ -134,8 +135,12 @@ static void test_benchmarks() {
   printf("frozen benchmark set, GPU vs oracle\n");
   printf("  %-18s %4s %8s %12s %12s\n", "circuit", "n", "gates", "max_diff",
          "norm_err");
+  // n=20 is here because it is the smallest width at which the deeper members
+  // of the set encode enough dispatches to fill the parameter pool mid-buffer.
+  // Everything below that stays inside one pool epoch, which is exactly why a
+  // pool-recycling bug survived this harness for so long.
   for (const auto &spec : frozen_benchmarks()) {
-    for (uint32_t n : {6u, 10u, 14u}) {
+    for (uint32_t n : {6u, 10u, 14u, 20u}) {
       Circuit c = spec.build(n);
       Reference r(n);
       r.run(c);
@@ -155,13 +160,65 @@ static void test_benchmarks() {
 
 static void test_error_growth() {
   printf("complex64 drift vs circuit depth (open question 4)\n");
-  printf("  %6s %8s %12s\n", "depth", "gates", "max_diff");
+  printf("  %6s %8s %12s %12s\n", "depth", "gates", "max_diff", "norm_err");
   const uint32_t n = 12;
-  for (uint32_t depth : {1u, 5u, 20u, 50u, 100u}) {
+  for (uint32_t depth : {1u, 5u, 20u, 50u, 85u, 90u, 100u}) {
     Circuit c = tfim_trotter(n, depth);
-    double d = compare(c);
-    printf("  %6u %8zu %12.3e\n", depth, c.size(), d);
+    Reference r(n);
+    r.run(c);
+    Simulator s(n);
+    s.run(c);
+    double d = max_amplitude_diff(r.state(), s.amplitudes());
+    double nerr = std::abs(s.norm() - 1.0);
+    printf("  %6u %8zu %12.3e %12.3e\n", depth, c.size(), d, nerr);
+    // Both are asserted. Drift is a slow power law in gate count, so an
+    // amplitude error anywhere near 1e-4 at these depths means something broke
+    // rather than merely rounded, and norm catches the non-unitary case that a
+    // dropped or double-read parameter buffer produces.
+    check_diff(d, 1e-4, "drift depth=" + std::to_string(depth));
+    check_diff(nerr, 1e-4, "drift norm depth=" + std::to_string(depth));
   }
+}
+
+// Command-buffer grouping must not change what the GPU computes. It once did:
+// the term pool was recycled when the encoder closed rather than when the
+// buffer finished, and a pool wrap could fall between the two parameter
+// regions of a single op. Both were invisible at the default cadence and
+// showed up only when the flush boundary moved, so the cadence is swept here
+// rather than left at whatever the default happens to be.
+static void test_flush_cadence_invariance() {
+  printf("results independent of command-buffer flush cadence\n");
+  printf("  %12s %12s %12s %12s\n", "flush_every", "max_diff", "norm_err",
+         "vs_first");
+  const uint32_t n = 12;
+  Circuit c = tfim_trotter(n, 90);
+  Reference r(n);
+  r.run(c);
+
+  const char *saved = getenv("QMETAL_FLUSH_EVERY");
+  const std::string prev = saved ? saved : "";
+  std::vector<cdouble> baseline;
+  for (const char *cadence : {"4", "17", "114", "115", "4096"}) {
+    setenv("QMETAL_FLUSH_EVERY", cadence, 1);
+    Simulator s(n);
+    s.run(c);
+    auto got = s.amplitudes();
+    double d = max_amplitude_diff(r.state(), got);
+    double nerr = std::abs(s.norm() - 1.0);
+    // Agreement with the first cadence is exact, not approximate: grouping
+    // dispatches into command buffers changes no arithmetic, so any nonzero
+    // difference is a lifetime bug rather than round-off.
+    double vs_base = baseline.empty() ? 0.0 : max_amplitude_diff(baseline, got);
+    printf("  %12s %12.3e %12.3e %12.3e\n", cadence, d, nerr, vs_base);
+    check_diff(d, 1e-4, std::string("cadence ") + cadence);
+    check_diff(nerr, 1e-4, std::string("cadence ") + cadence + " norm");
+    check_diff(vs_base, 0.0, std::string("cadence ") + cadence + " vs first");
+    if (baseline.empty()) baseline = std::move(got);
+  }
+  if (saved)
+    setenv("QMETAL_FLUSH_EVERY", prev.c_str(), 1);
+  else
+    unsetenv("QMETAL_FLUSH_EVERY");
 }
 
 static void test_fails_closed() {
@@ -441,6 +498,7 @@ int main() {
   test_gradients();
   test_benchmarks();
   test_error_growth();
+  test_flush_cadence_invariance();
 
   printf("\n%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
